@@ -1,9 +1,11 @@
 import { createLiveSession, getLiveSession } from '@/lib/live/transcription-server';
 import { rateLimit, sameOrigin, sessionId } from '@/lib/server-session';
+import {createTranscriptionToken,ephemeralLiveTransport} from '@/lib/live/transcription-token';
+import {enforceAiQuota} from '@/lib/security/ai-quota';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const maxDuration = 14400;
+export const maxDuration = 60;
 const headers = {'Cache-Control':'no-store'};
 const failure = (error: string, status: number) => Response.json({error}, {status, headers});
 
@@ -20,11 +22,12 @@ export async function POST(request: Request) {
  const url = new URL(request.url), id = url.searchParams.get('id');
  if (!id) {
   if (!rateLimit(`live:create:${identity}`, 12)) return failure('Too many recording attempts. Wait a minute and retry.', 429);
-  try { return Response.json({id:createLiveSession(identity).id}, {headers}); }
+  const quota = await enforceAiQuota('live-create'); if (quota) return quota;
+  try { return Response.json(ephemeralLiveTransport() ? await createTranscriptionToken() : {id:createLiveSession(identity).id}, {headers}); }
   catch (cause) {
    // Factory errors can contain authenticated upstream URLs. Only public messages
    // generated here or by the session's deliberate validation reach the browser.
-   const message = cause instanceof Error && /^(Live transcription needs a Gemini API key configured on the server\.|Another live transcription is active\. Stop it before starting a new recording\.)$/.test(cause.message)
+   const message = cause instanceof Error && /^(Live transcription needs a Gemini API key configured on the server\.|Another live transcription is active\. Stop it before starting a new recording\.|Live transcription could not connect\. Check Gemini model access, quota, and server connection\.)$/.test(cause.message)
     ? cause.message : 'Live transcription could not start. Check the server configuration and connection.';
    return failure(message, 503);
   }

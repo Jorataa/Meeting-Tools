@@ -1,22 +1,27 @@
 import { Voice } from '@/lib/audio/speech';
-import { ANALYSIS_INTERVAL_MS, canInterrupt, emptyMeetingContext, interruptionSchema, MIN_INTERRUPT_CONFIDENCE, MIN_INTERRUPT_RELEVANCE, isRepeated, type AskedInterruption, type Interruption, type MeetingContext } from './policy';
+import { ANALYSIS_INTERVAL_MS, canInterrupt, emptyMeetingContext, interruptionSchema, MIN_INTERRUPT_CONFIDENCE, MIN_INTERRUPT_RELEVANCE, isRepeated, isUsefulQuestion, type AskedInterruption, type Interruption, type MeetingContext } from './policy';
 
+export type ClarificationHistory = Omit<AskedInterruption, 'disposition'> & { disposition: 'suggested' | 'asked' | 'dismissed' };
 export type LiveSnapshot = {
   active: boolean; transcript: string; notes: string; question: string;
   status: 'idle' | 'connecting' | 'listening' | 'transcribing' | 'thinking' | 'waiting' | 'speaking';
   notice: string; asked: AskedInterruption[]; suppressCapture: boolean;
   context: MeetingContext; questionReason: string; questionConfidence: number;
+  manualResponse: string; manualBusy: boolean;
+  questionHistory: ClarificationHistory[];
 };
 export const emptyLiveSnapshot: LiveSnapshot = {
   active: false, transcript: '', notes: '', question: '', status: 'idle', notice: '', asked: [],
   suppressCapture: false, context: emptyMeetingContext, questionReason: '', questionConfidence: 0,
+  manualResponse: '', manualBusy: false,
+  questionHistory: [],
 };
 type VoiceService = Pick<Voice, 'speak' | 'cancel'>;
 type Dependencies = { fetch?: typeof fetch; now?: () => number; voice?: VoiceService };
 
 /** Observes human transcript events independently of microphone capture and transcription. */
 export class LiveInterruptionController {
-  private view: LiveSnapshot = { ...emptyLiveSnapshot, asked: [] };
+  private view: LiveSnapshot = { ...emptyLiveSnapshot, asked: [], questionHistory: [] };
   private voice: VoiceService;
   private fetcher: typeof fetch;
   private now: () => number;
@@ -47,6 +52,9 @@ export class LiveInterruptionController {
   private finalizedTranscript = '';
   private finalizingTranscript = '';
   private finalizationVersion = 0;
+  private notesVersion = 0;
+  private notesEdited = false;
+  private manualVersion = 0;
   constructor(private onChange: (snapshot: LiveSnapshot) => void, dependencies: Dependencies = {}) {
     this.fetcher = dependencies.fetch || fetch.bind(globalThis);
     this.now = dependencies.now || Date.now;
@@ -57,7 +65,7 @@ export class LiveInterruptionController {
     // changes so audio frames do not continually rerender the entire workspace.
     if (Object.entries(patch).every(([key, value]) => this.view[key as keyof LiveSnapshot] === value)) return;
     this.view = { ...this.view, ...patch };
-    this.onChange({ ...this.view, asked: [...this.view.asked] });
+    this.onChange({ ...this.view, asked: [...this.view.asked], questionHistory: [...this.view.questionHistory] });
   }
   private clearCandidate() {
     this.candidate = undefined;
@@ -68,6 +76,52 @@ export class LiveInterruptionController {
     if (!enabled) { this.cancelVoice(); this.clearCandidate(); }
   }
   setVoiceEnabled(enabled: boolean) { this.voiceEnabled = enabled; if (!enabled) this.cancelVoice(); }
+  updateNotes(notes: string) {
+    this.notesVersion++; this.notesEdited = true;
+    this.publish({ notes: notes.slice(0, 16000) });
+  }
+  dismissQuestion() {
+    const result = this.candidate?.result;
+    this.cancelVoice(); this.clearCandidate();
+    if (result && !isRepeated(result, this.view.asked)) {
+      this.lastQuestionAt = this.now();
+      this.publish({ asked: [...this.view.asked, { gapKey: result.gapKey, question: result.question, category: result.category, at: this.now(), disposition: 'dismissed' }] });
+      this.rememberQuestion(result, 'dismissed');
+    }
+    this.publish({ status: this.view.active ? 'listening' : 'idle' });
+  }
+  private rememberQuestion(result: Interruption, disposition: ClarificationHistory['disposition']) {
+    const existing = this.view.questionHistory.findIndex(item => item.gapKey === result.gapKey);
+    const history = [...this.view.questionHistory];
+    if (existing >= 0) history[existing] = { ...history[existing], disposition };
+    else history.push({ gapKey: result.gapKey, question: result.question, category: result.category, at: this.now(), disposition });
+    this.publish({ questionHistory: history.slice(-50) });
+  }
+  /** Read-only, explicitly initiated by the user. Does not pause transcription or speak. */
+  async askAI(question: string, transcript = this.view.transcript, meeting?: { notes: string; context: MeetingContext }) {
+    if (!question.trim() || !transcript.trim() || this.view.manualBusy) return;
+    const version = ++this.manualVersion, epoch = this.epoch;
+    this.publish({ manualBusy: true, manualResponse: '' });
+    try {
+      const response = await this.request('/api/ask', {
+        question: question.trim().slice(0, 1000), transcript: this.memoryTranscript(transcript),
+        notes: (meeting?.notes ?? this.view.notes).slice(0, 16000), context: meeting?.context ?? this.view.context, asked: this.view.asked.slice(-50),
+      }, 35000);
+      if (!response.ok) throw new Error('Question unavailable');
+      const result: unknown = await response.json();
+      if (!result || typeof result !== 'object' || !('answer' in result) || typeof result.answer !== 'string' || !result.answer.trim() || result.answer.length > 4000) throw new Error('Invalid answer');
+      if (epoch === this.epoch && version === this.manualVersion) this.publish({ manualResponse: result.answer, notice: '' });
+    } catch {
+      if (epoch === this.epoch && version === this.manualVersion) this.publish({ notice: 'AI could not answer right now. Your recording and transcript continue.' });
+    } finally {
+      if (epoch === this.epoch && version === this.manualVersion) this.publish({ manualBusy: false });
+    }
+  }
+  private memoryTranscript(transcript: string) {
+    // Preserve early commitments as well as recent answers; middle facts also
+    // remain in the structured context and notes carried between analyses.
+    return transcript.length <= 60000 ? transcript : `${transcript.slice(0, 12000)}\n[Middle of meeting retained in context and notes]\n${transcript.slice(-47000)}`;
+  }
   setPaused(paused: boolean) {
     this.paused = paused; this.observation++;
     if (paused) { this.cancelVoice(); this.clearCandidate(); }
@@ -95,12 +149,13 @@ export class LiveInterruptionController {
     void this.tick();
   }
   async start() {
-    this.stop(); this.view = { ...emptyLiveSnapshot, asked: [] };
+    this.stop(); this.view = { ...emptyLiveSnapshot, asked: [], questionHistory: [] };
     this.revision = 0; this.observation = 0; this.analyzedRevision = -1; this.committedTranscript = '';
     this.partial = false; this.paused = false; this.analysisBusy = false; this.voiceBusy = false;
     this.sessionReady = false; this.sessionBusy = false; this.sessionRetryAt = 0;
     this.finalizedTranscript = ''; this.finalizingTranscript = ''; this.finalizationVersion++;
     this.analysisRetryAt = 0; this.lastQuestionAt = -Infinity; this.lastVoiceAttempt = -Infinity; this.lastAnalysisAt = -Infinity;
+    this.notesVersion = 0; this.notesEdited = false;
     this.startedAt = this.lastVoiceAt = this.now();
     this.publish({ active: true, status: 'connecting' });
     this.timer = setInterval(() => void this.tick(), 200);
@@ -150,12 +205,12 @@ export class LiveInterruptionController {
     if (!this.analysisBusy && !this.voiceBusy) this.publish({ status: this.candidate && this.enabled ? 'waiting' : 'listening' });
   }
   private async analyze(epoch: number, final: boolean, transcript = this.committedTranscript, finalizationVersion?: number): Promise<boolean> {
-    const revision = this.revision, observation = this.observation;
+    const revision = this.revision, observation = this.observation, notesVersion = this.notesVersion;
     this.analysisBusy = true; this.lastAnalysisAt = this.now();
     if (!final) { this.clearCandidate(); this.publish({ status: 'thinking' }); }
     try {
       const response = await this.request('/api/interruption', {
-        transcript: transcript.slice(-60000), notes: this.view.notes.slice(0, 16000), asked: this.view.asked.slice(-50), final,
+        transcript: this.memoryTranscript(transcript), notes: this.view.notes.slice(0, 16000), context: this.view.context, asked: this.view.asked.slice(-50), final,
       }, 35000);
       if (!response.ok) {
         if (response.status === 401) { this.sessionReady = false; this.sessionRetryAt = 0; }
@@ -165,11 +220,12 @@ export class LiveInterruptionController {
       if (epoch !== this.epoch || (!final && (revision !== this.revision || observation !== this.observation || this.partial || this.paused))
         || (final && finalizationVersion !== this.finalizationVersion)) return false;
       this.analyzedRevision = revision;
-      this.publish({ notes: result.notes, context: result.context ?? { ...emptyMeetingContext, summary: result.notes.slice(0, 3000) }, notice: '' });
+      this.publish({ ...(!this.notesEdited && notesVersion === this.notesVersion ? { notes: result.notes } : {}), context: result.context ?? { ...emptyMeetingContext, summary: result.notes.slice(0, 3000) }, notice: '' });
       if (!final && this.enabled && result.shouldInterrupt && result.confidence >= MIN_INTERRUPT_CONFIDENCE
         && (result.relevance ?? result.confidence) >= MIN_INTERRUPT_RELEVANCE && result.category !== 'none'
-        && result.question.trim() && result.gapKey.trim() && !isRepeated(result, this.view.asked)) {
+        && isUsefulQuestion(result) && !isRepeated(result, this.view.asked)) {
         this.candidate = { result, revision, at: this.now() };
+        this.rememberQuestion(result, 'suggested');
         this.publish({ question: result.question, questionReason: result.reason, questionConfidence: result.confidence });
       }
       return true;
@@ -192,7 +248,8 @@ export class LiveInterruptionController {
           if (epoch !== this.epoch) return;
           didStart = true; this.spoken = true; this.lastQuestionAt = this.lastVoiceAttempt = this.now();
           const result = candidate.result;
-          this.publish({ status: 'speaking', asked: [...this.view.asked, { gapKey: result.gapKey, question: result.question, category: result.category, at: this.now() }] });
+          this.publish({ status: 'speaking', asked: [...this.view.asked, { gapKey: result.gapKey, question: result.question, category: result.category, at: this.now(), disposition: 'asked' }] });
+          this.rememberQuestion(result, 'asked');
         },
       });
       if (epoch !== this.epoch) return;
@@ -219,11 +276,13 @@ export class LiveInterruptionController {
     this.epoch++; if (this.timer) clearInterval(this.timer); this.timer = undefined;
     this.requests.forEach(request => request.abort()); this.requests.clear();
     this.cancelVoice(); this.candidate = undefined; this.voiceBusy = false; this.sessionReady = false;
-    this.publish({ active: false, status: 'idle', question: '', questionReason: '', questionConfidence: 0, suppressCapture: false });
+    this.manualVersion++;
+    this.publish({ active: false, status: 'idle', question: '', questionReason: '', questionConfidence: 0, suppressCapture: false, manualBusy: false });
   }
   reset() {
+    this.notesVersion++; this.notesEdited = false;
     this.stop(); this.finalizedTranscript = ''; this.finalizingTranscript = ''; this.finalizationVersion++;
-    this.publish({ ...emptyLiveSnapshot, asked: [] });
+    this.publish({ ...emptyLiveSnapshot, asked: [], questionHistory: [] });
   }
   async finalize(transcript: string) {
     if (!transcript.trim() || transcript === this.finalizedTranscript || transcript === this.finalizingTranscript) return;

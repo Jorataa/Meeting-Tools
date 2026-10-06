@@ -2,6 +2,9 @@ import { z } from 'zod';
 import { GeminiAPIError } from '@/lib/ai/gemini-rest';
 import { generateVoice } from '@/lib/ai/voice';
 import { rateLimit, sameOrigin, sessionId } from '@/lib/server-session';
+import {BodyTooLarge,boundedText} from '@/lib/bounded-text';
+import {securityLog} from '@/lib/security/log';
+import {enforceAiQuota} from '@/lib/security/ai-quota';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -9,7 +12,7 @@ export const maxDuration = 25;
 
 const voiceRequestSchema = z.object({
   text: z.string().trim().min(1, 'Text is required').max(2500, 'Text is too long (maximum 2,500 characters)'),
-});
+}).strict();
 
 export async function POST(request: Request) {
   if (!sameOrigin(request)) {
@@ -29,9 +32,11 @@ export async function POST(request: Request) {
   }
 
   let bodyJson: unknown;
+  const quota=await enforceAiQuota('voice');if(quota)return quota;
   try {
-    bodyJson = await request.json();
-  } catch {
+    bodyJson = JSON.parse(await boundedText(request,3500));
+  } catch (error) {
+    if(error instanceof BodyTooLarge)return Response.json({error:'Voice input is too large.',code:'TOO_LARGE'},{status:413});
     return Response.json({ error: 'Invalid JSON request body.', code: 'INVALID_JSON' }, { status: 400 });
   }
 
@@ -56,6 +61,7 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
+    securityLog('ai.voice_failed',{route:'/api/voice',status:error instanceof GeminiAPIError?error.status:502,code:'VOICE_FAILED'});
     if (error instanceof GeminiAPIError) {
       return Response.json(
         { error: 'AI voice is temporarily unavailable. Recording can continue.', code: error.code },

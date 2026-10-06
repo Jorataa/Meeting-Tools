@@ -1,0 +1,26 @@
+import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
+const mocks=vi.hoisted(()=>({getUser:vi.fn(),refreshSession:vi.fn(),signInWithPassword:vi.fn(),signUp:vi.fn(),cookieGet:vi.fn(),cookieSet:vi.fn()}));
+vi.mock('server-only',()=>({}));
+vi.mock('next/headers',()=>({cookies:async()=>({get:mocks.cookieGet,set:mocks.cookieSet})}));
+vi.mock('@supabase/supabase-js',()=>({createClient:vi.fn(()=>({auth:{getUser:mocks.getUser,refreshSession:mocks.refreshSession,signInWithPassword:mocks.signInWithPassword,signUp:mocks.signUp}}))}));
+import {authMode,verifiedRequestIdentity,serverSupabase,clearAuthSession} from '@/lib/auth/server';
+import {createSession,sessionId} from '@/lib/server-session';
+import {POST as login} from '@/app/api/auth/sign-in/route';
+import {createClient} from '@supabase/supabase-js';
+const identity={id:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',email:'owner@example.com'};
+beforeEach(()=>{vi.clearAllMocks();vi.stubEnv('HUSH_AUTH_MODE','');vi.stubEnv('NODE_ENV','production');vi.stubEnv('SUPABASE_URL','');vi.stubEnv('SUPABASE_PUBLISHABLE_KEY','');vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL','');vi.stubEnv('NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY','');vi.stubEnv('SESSION_SECRET','');});
+afterEach(()=>vi.unstubAllEnvs());
+function configured(){vi.stubEnv('SUPABASE_URL','https://project.supabase.co');vi.stubEnv('SUPABASE_PUBLISHABLE_KEY','sb_publishable_test');}
+function request(body:unknown){return new Request('https://hush.example/api/auth/sign-in',{method:'POST',headers:{origin:'https://hush.example','content-type':'application/json'},body:JSON.stringify(body)});}
+describe('verified production identity',()=>{
+ it('fails closed without configured authentication',async()=>{expect(authMode()).toBe('unavailable');expect(await sessionId()).toBeNull();await expect(createSession()).rejects.toThrow('disabled');});
+ it('requires explicit demo and a strong production signing secret',()=>{vi.stubEnv('HUSH_AUTH_MODE','demo');expect(authMode()).toBe('unavailable');vi.stubEnv('SESSION_SECRET','a'.repeat(32));expect(authMode()).toBe('demo');});
+ it('rejects privileged or insecure Supabase configuration',()=>{configured();vi.stubEnv('SUPABASE_PUBLISHABLE_KEY','sb_secret_do-not-use');expect(serverSupabase()).toBeNull();vi.stubEnv('SUPABASE_PUBLISHABLE_KEY','sb_publishable_test');vi.stubEnv('SUPABASE_URL','http://project.supabase.co');expect(serverSupabase()).toBeNull();});
+ it('verifies access tokens server-side and shares only the identity',async()=>{configured();mocks.cookieGet.mockReturnValue({value:'server-verified-token'});mocks.getUser.mockResolvedValue({data:{user:identity},error:null});expect(await verifiedRequestIdentity()).toEqual(identity);expect(mocks.getUser).toHaveBeenCalledWith('server-verified-token');expect(await sessionId()).toBe(identity.id);expect(mocks.getUser).toHaveBeenCalledTimes(1);});
+ it('does not trust forged user identity in cookie payloads',async()=>{configured();mocks.cookieGet.mockReturnValue({value:'forged-user-id'});mocks.getUser.mockResolvedValue({data:{user:null},error:{message:'untrusted private provider error'}});expect(await sessionId()).toBeNull();});
+ it('rejects Supabase anonymous sign-ins',async()=>{configured();mocks.cookieGet.mockReturnValue({value:'anonymous-token'});mocks.getUser.mockResolvedValue({data:{user:{...identity,is_anonymous:true}},error:null});expect(await sessionId()).toBeNull();});
+ it('rejects malformed demo expiry and cookie suffixes',async()=>{vi.stubEnv('HUSH_AUTH_MODE','demo');vi.stubEnv('SESSION_SECRET','a'.repeat(32));mocks.cookieGet.mockReturnValue({value:`${'a'.repeat(36)}.NaN.${'a'.repeat(64)}`});expect(await sessionId()).toBeNull();mocks.cookieGet.mockReturnValue({value:`${'a'.repeat(36)}.${Date.now()+10000}.${'a'.repeat(64)}.extra`});expect(await sessionId()).toBeNull();});
+ it('sets HttpOnly secure cookies and excludes tokens from sign-in JSON',async()=>{configured();mocks.signInWithPassword.mockResolvedValue({data:{session:{access_token:'private-access',refresh_token:'private-refresh',expires_in:3600}},error:null});const response=await login(request({email:identity.email,password:'correct-password'}));expect(response.status).toBe(200);expect(await response.text()).not.toContain('private-');expect(mocks.cookieSet).toHaveBeenCalledWith('hush_access','private-access',expect.objectContaining({httpOnly:true,secure:true,sameSite:'strict',path:'/'}));expect(vi.mocked(createClient).mock.calls[0][2]).toMatchObject({auth:{persistSession:false,autoRefreshToken:false}});});
+ it('rejects client user_id and oversized credential requests',async()=>{configured();expect((await login(request({email:identity.email,password:'correct-password',user_id:'other-user'}))).status).toBe(400);expect((await login(request({email:'x'.repeat(3000),password:'correct-password'}))).status).toBe(413);expect(mocks.signInWithPassword).not.toHaveBeenCalled();});
+ it('clears all server session cookies on sign-out',async()=>{mocks.cookieGet.mockReturnValue(undefined);await clearAuthSession();expect(mocks.cookieSet).toHaveBeenCalledWith('hush_access','',expect.objectContaining({maxAge:0,httpOnly:true}));expect(mocks.cookieSet).toHaveBeenCalledWith('hush_refresh','',expect.objectContaining({maxAge:0}));});
+});

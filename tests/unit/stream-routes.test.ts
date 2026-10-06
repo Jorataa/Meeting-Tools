@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('server-only', () => ({}));
 const mocks = vi.hoisted(() => ({
- sessionId: vi.fn(async () => 'owner'), sameOrigin: vi.fn(() => true), rateLimit: vi.fn(() => true),
+ sessionId: vi.fn(async ():Promise<string|null> => 'owner'), sameOrigin: vi.fn(() => true), rateLimit: vi.fn(() => true),
  create: vi.fn(), get: vi.fn(), append: vi.fn(), end: vi.fn(), close: vi.fn(), pause: vi.fn(), touch: vi.fn(), subscribe: vi.fn(),
+ quota:vi.fn(),ephemeral:vi.fn(),token:vi.fn(),
 }));
 vi.mock('@/lib/server-session', () => ({ sessionId: mocks.sessionId, sameOrigin: mocks.sameOrigin, rateLimit: mocks.rateLimit }));
 vi.mock('@/lib/live/transcription-server', () => ({ createLiveSession: mocks.create, getLiveSession: mocks.get }));
+vi.mock('@/lib/security/ai-quota',()=>({enforceAiQuota:mocks.quota}));
+vi.mock('@/lib/live/transcription-token',()=>({ephemeralLiveTransport:mocks.ephemeral,createTranscriptionToken:mocks.token}));
 import { GET, POST } from '@/app/api/live/stream/route';
 const session = { id: 'live-id', append: mocks.append, end: mocks.end, close: mocks.close, setPaused: mocks.pause, touch: mocks.touch, subscribe: mocks.subscribe };
 function request(query = '', body?: Uint8Array, patch: Record<string, string> = {}) {
@@ -16,12 +19,24 @@ function request(query = '', body?: Uint8Array, patch: Record<string, string> = 
 beforeEach(() => {
  vi.resetAllMocks(); mocks.sessionId.mockResolvedValue('owner'); mocks.sameOrigin.mockReturnValue(true); mocks.rateLimit.mockReturnValue(true);
  mocks.create.mockReturnValue(session); mocks.get.mockReturnValue(session); mocks.subscribe.mockReturnValue(vi.fn());
+ mocks.quota.mockResolvedValue(null);mocks.ephemeral.mockReturnValue(false);mocks.token.mockResolvedValue({transport:'ephemeral',token:'scoped-fixture'});
 });
 afterEach(() => vi.useRealTimers());
 describe('secured live stream routes', () => {
  it('creates only a server-owned opaque session', async () => {
   const response = await POST(request()); expect(await response.json()).toEqual({ id: 'live-id' });
   expect(mocks.create).toHaveBeenCalledWith('owner');
+ });
+ it('mints constrained credentials only after authentication and durable quota checks',async()=>{
+  mocks.ephemeral.mockReturnValue(true);
+  const response=await POST(request());expect(await response.json()).toEqual({transport:'ephemeral',token:'scoped-fixture'});
+  expect(mocks.quota).toHaveBeenCalledWith('live-create');expect(mocks.token).toHaveBeenCalledOnce();expect(mocks.create).not.toHaveBeenCalled();
+  mocks.sessionId.mockResolvedValue(null);expect((await POST(request())).status).toBe(401);expect(mocks.token).toHaveBeenCalledOnce();
+ });
+ it('fails closed on quota rejection without charging normal PCM or recording controls',async()=>{
+  mocks.quota.mockResolvedValue(Response.json({error:'Wait'},{status:429}));expect((await POST(request())).status).toBe(429);expect(mocks.create).not.toHaveBeenCalled();expect(mocks.token).not.toHaveBeenCalled();
+  expect((await POST(request('?id=live-id&frame=0',new Uint8Array([1,0])))).status).toBe(200);
+  expect((await POST(request('?id=live-id&action=pause'))).status).toBe(200);expect(mocks.quota).toHaveBeenCalledOnce();
  });
  it('rejects unauthenticated mutations and cross-origin reads', async () => {
   mocks.sameOrigin.mockReturnValue(false); expect((await POST(request())).status).toBe(401);

@@ -1,4 +1,7 @@
 import { callGeminiGenerateContent, GeminiAPIError } from '@/lib/ai/gemini-rest';
+import {rateLimit,sameOrigin,sessionId} from '@/lib/server-session';
+import {geminiConfigured} from '@/lib/ai/config';
+import {enforceAiQuota} from '@/lib/security/ai-quota';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -64,9 +67,14 @@ async function handleHealthCheck() {
 }
 
 export async function GET() {
-  return handleHealthCheck();
+  if(!await sessionId())return Response.json({error:'Sign in to check AI availability.'},{status:401});
+  return Response.json({configured:geminiConfigured()},{headers:{'Cache-Control':'no-store'}});
 }
 
-export async function POST() {
+export async function POST(request:Request) {
+  if(!sameOrigin(request))return Response.json({error:'Request origin not allowed.'},{status:403});
+  const id=await sessionId();if(!id)return Response.json({error:'Sign in to check AI availability.'},{status:401});
+  if(!rateLimit(`diagnostic:${id}`,3))return Response.json({error:'Please wait before checking again.'},{status:429,headers:{'Retry-After':'60'}});
+  const quota=await enforceAiQuota('diagnostic');if(quota)return quota;
   return handleHealthCheck();
 }

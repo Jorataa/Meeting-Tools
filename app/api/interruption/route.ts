@@ -6,6 +6,7 @@ import { BodyTooLarge, boundedText } from '@/lib/bounded-text';
 import { geminiMeetingModels } from '@/lib/ai/config';
 import { CLARIFICATION_INSTRUCTION } from '@/lib/ai/meeting-instructions';
 import { securityLog } from '@/lib/security/log';
+import { enforceAiQuota } from '@/lib/security/ai-quota';
 
 export const runtime = 'nodejs';
 export const maxDuration = 45;
@@ -22,6 +23,8 @@ export async function POST(request: Request) {
   const id = await sessionId();
   if (!id) return Response.json({ error: 'Session expired. Please reconnect.' }, { status: 401, headers });
   if (!rateLimit(`interrupt:${id}`, 12) || !rateLimit(`interrupt-hour:${id}`, 400, 3600000)) return Response.json({ error: 'AI is busy. Recording can continue.' }, { status: 429, headers: { ...headers, 'Retry-After': '30' } });
+  const quota = await enforceAiQuota('interruption');
+  if (quota) return quota;
   try {
     const text = await boundedText(request, 100000);
     const input = inputSchema.parse(JSON.parse(text));

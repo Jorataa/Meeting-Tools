@@ -1,2 +1,2 @@
-import { TranscriptionApp } from '@/components/transcription-app';
-export default function Page() { return <TranscriptionApp/>; }
+import { AuthGate } from '@/components/auth-gate';
+export default function Page() { return <AuthGate/>; }

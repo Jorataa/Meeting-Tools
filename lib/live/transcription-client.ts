@@ -1,4 +1,5 @@
 'use client';
+import {DirectTranscription,type TranscriptionCredential} from './transcription-direct';
 
 type Callbacks = {
  onPartial: (text: string, at: number) => void;
@@ -39,6 +40,8 @@ export class StreamingTranscription {
  private resolveReady?: () => void;
  private rejectReady?: (error: Error) => void;
  private readyTimer?: ReturnType<typeof setTimeout>;
+ private direct?: DirectTranscription;
+ private directSequence = 0;
  constructor(private callbacks: Callbacks) {}
 
  async start(stream: MediaStream): Promise<void> {
@@ -59,6 +62,17 @@ export class StreamingTranscription {
    const created = await this.request('/api/live/stream', {method:'POST'}, 15000);
    if (!created.ok) throw new Error(await this.errorMessage(created, 'Live transcription could not connect.'));
    const data = await created.json();
+   if (!data || typeof data !== 'object') throw new Error('Live transcription could not create a session.');
+   if (data.transport === 'ephemeral') {
+    this.direct = new DirectTranscription(event => this.handle({...event,sequence:++this.directSequence}), async () => {
+     const renewed = await this.request('/api/live/stream',{method:'POST'},15000);
+     if (!renewed.ok) throw new Error(await this.errorMessage(renewed,'Live transcription could not reconnect.'));
+     const credential = await renewed.json();
+     if (credential.transport !== 'ephemeral' || typeof credential.token !== 'string') throw new Error('Live transcription could not reconnect.');
+     return credential as TranscriptionCredential;
+    }, () => { void this.pump(); });
+    await this.direct.start(data as TranscriptionCredential); return;
+   }
    if (typeof data.id !== 'string') throw new Error('Live transcription could not create a session.');
    this.id = data.id;
    const ready = new Promise<void>((resolve, reject) => {
@@ -99,6 +113,9 @@ export class StreamingTranscription {
   await Promise.race([this.controls, delay(Math.max(0, deadline - Date.now()))]);
   while ((this.sending || this.queue.length) && Date.now() < deadline && !this.cancelled) { void this.pump(); await delay(20); }
   if (this.queue.length || this.heldAudio.length || this.sending) this.callbacks.onStatus('error', 'The connection did not finish sending the last audio. Your local recording is retained.');
+  if (this.direct && !this.cancelled) {
+   await Promise.race([this.direct.finish(),delay(Math.max(0,finishBy-Date.now()))]);this.cancel();return;
+  }
   if (this.id && !this.cancelled) {
    try {
     const response = await this.request(this.url('end'), {method:'POST'}, 700);
@@ -115,6 +132,7 @@ export class StreamingTranscription {
   if (this.readyTimer) clearTimeout(this.readyTimer);
   this.resolveReady?.();
   this.abort.abort(); this.queue = []; this.heldAudio = []; this.queuedBytes = 0;
+  this.direct?.cancel();
   void this.activeReader?.cancel().catch(() => {});
   this.node?.disconnect(); this.source?.disconnect(); this.silent?.disconnect();
   if (this.node) this.node.port.onmessage = null;
@@ -139,10 +157,15 @@ export class StreamingTranscription {
   void this.pump();
  }
  private async pump() {
-  if (this.sending || this.serverPaused || !this.ready || !this.id || this.cancelled || this.ended) return;
+  if (this.sending || this.serverPaused || !this.ready || (!this.id && !this.direct) || this.cancelled || this.ended) return;
   this.sending = true;
   try {
    while (this.queue.length && !this.serverPaused && !this.cancelled && !this.ended) {
+    if (this.direct) {
+     const bytes=this.queue[0];
+     if(!this.direct.send(bytes))break;
+     this.queue.shift();this.queuedBytes-=bytes.length;continue;
+    }
     // Batch pending frames up to 400ms only when network backpressure builds.
     const parts: Uint8Array[] = []; let size = 0;
     while (this.queue.length && size + this.queue[0].length <= 12800) {
@@ -228,6 +251,11 @@ export class StreamingTranscription {
  private async controlAfterAudio(action: string) {
   const deadline = Date.now() + 2000;
   while ((this.sending || this.queue.length) && Date.now() < deadline && !this.cancelled) { void this.pump(); await delay(15); }
+  if(this.direct&&!this.cancelled){
+   this.direct.setPaused(action==='pause');this.serverPaused=action==='pause';
+   if(!this.serverPaused){this.queue.push(...this.heldAudio);this.heldAudio=[];void this.pump();}
+   return;
+  }
   if (this.id && !this.cancelled) {
    try {
     const response = await this.request(this.url(action), {method:'POST'}, 3000);

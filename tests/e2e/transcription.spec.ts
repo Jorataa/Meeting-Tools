@@ -203,6 +203,19 @@ test.describe('live Gemini', () => {
     await context.grantPermissions(['microphone']);
     await page.addInitScript(() => {
       (window as unknown as { observedPartialCount: number }).observedPartialCount = 0;
+      const RealWebSocket=window.WebSocket;
+      class ObservedWebSocket extends RealWebSocket {
+        constructor(url:string|URL,protocols?:string|string[]) {
+          super(url,protocols);
+          this.addEventListener('message',async event=>{
+            try {
+              const raw=typeof event.data==='string'?event.data:event.data instanceof Blob?await event.data.text():new TextDecoder().decode(event.data);
+              if(JSON.parse(raw).serverContent?.interimInputTranscription?.text)(window as unknown as {observedPartialCount:number}).observedPartialCount++;
+            } catch {}
+          });
+        }
+      }
+      window.WebSocket=ObservedWebSocket;
       const original = window.fetch.bind(window);
       window.fetch = async (input, options) => {
         const response = await original(input, options);

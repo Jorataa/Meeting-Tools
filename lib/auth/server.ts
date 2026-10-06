@@ -25,10 +25,11 @@ function supabaseConfig() {
 export function serverSupabase(accessToken?:string): SupabaseClient | null {
  const config=supabaseConfig(); if(!config)return null;
  return createClient(config.url,config.key,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false},
-  ...(accessToken?{global:{headers:{Authorization:`Bearer ${accessToken}`}}}:{})});
+  global:{...(accessToken?{headers:{Authorization:`Bearer ${accessToken}`}}:{}),fetch:(input,init)=>fetch(input,{...init,signal:init?.signal?AbortSignal.any([init.signal,AbortSignal.timeout(10000)]):AbortSignal.timeout(10000)})}});
 }
 const verified=new Map<string,{until:number;user:AuthUser}>();
 const pending=new Map<string,Promise<AuthUser|null>>();
+const refreshing=new Map<string,Promise<Session|null>>();
 function tokenKey(token:string){return createHash('sha256').update(token).digest('hex');}
 export async function accessToken(){return (await cookies()).get(ACCESS_COOKIE)?.value??null;}
 export async function verifiedRequestIdentity():Promise<AuthUser|null> {
@@ -36,6 +37,7 @@ export async function verifiedRequestIdentity():Promise<AuthUser|null> {
  const token=await accessToken(); if(!token||token.length>12000)return null;
  const key=tokenKey(token),cached=verified.get(key);if(cached&&cached.until>Date.now())return cached.user;
  const existing=pending.get(key);if(existing)return existing;
+ if(pending.size>=256){securityLog('auth.busy',{code:'AUTH_CAPACITY'});return null;}
  const task=(async()=>{
   try {const client=serverSupabase();if(!client)return null;
    const {data,error}=await client.auth.getUser(token);
@@ -55,9 +57,12 @@ export async function setAuthSession(session:Session){
 export async function refreshAuthSession(){
  const client=serverSupabase(),refresh=(await cookies()).get(REFRESH_COOKIE)?.value;
  if(!client||!refresh||refresh.length>12000)return false;
- try{const{data,error}=await client.auth.refreshSession({refresh_token:refresh});
-  if(error||!data.session||data.user?.is_anonymous)return false;await setAuthSession(data.session);return true;
- }catch{return false;}
+ const key=tokenKey(refresh);
+ let task=refreshing.get(key);
+ if(!task&&refreshing.size>=256)return false;
+ if(!task){task=(async()=>{try{const{data,error}=await client.auth.refreshSession({refresh_token:refresh});return error||!data.session||data.user?.is_anonymous?null:data.session;}catch{return null;}})();refreshing.set(key,task);}
+ try{const session=await task;if(!session)return false;await setAuthSession(session);return true;}
+ finally{if(refreshing.get(key)===task)refreshing.delete(key);}
 }
 export async function clearAuthSession(){
  const store=await cookies(),token=store.get(ACCESS_COOKIE)?.value;

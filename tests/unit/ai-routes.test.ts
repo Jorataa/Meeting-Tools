@@ -7,12 +7,13 @@ vi.mock('@/lib/server-session', () => ({
   rateLimit: vi.fn(() => true),
 }));
 
-import { GET as getAiTest } from '@/app/api/ai/test/route';
+import { POST as postAiTest } from '@/app/api/ai/test/route';
 import { POST as postAi } from '@/app/api/ai/route';
 import { callGeminiGenerateContent } from '@/lib/ai/gemini-rest';
 import { rateLimit, sameOrigin, sessionId } from '@/lib/server-session';
 
 const fetchMock = vi.fn<typeof fetch>();
+const getAiTest=()=>postAiTest(new Request('http://localhost:3000/api/ai/test',{method:'POST',headers:{Origin:'http://localhost:3000'}}));
 
 beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock);

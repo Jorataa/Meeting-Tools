@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { canInterrupt, type InterruptGate, type Interruption } from '@/lib/live/policy';
+import { canInterrupt, isUsefulQuestion, type InterruptGate, type Interruption } from '@/lib/live/policy';
 import { LiveInterruptionController, type LiveSnapshot } from '@/lib/live/controller';
 
 const gap: Interruption = { shouldInterrupt: true, confidence: 0.92, category: 'deadline', question: 'Tanggal berapa deadline peluncuran?', reason: 'Tanggal belum jelas.', gapKey: 'deadline:launch', notes: 'Peluncuran: tanggal belum jelas.' };
@@ -23,6 +23,17 @@ describe('conservative interruption policy', () => {
     expect(canInterrupt(gap, gate, [{ ...gap, question: 'What exact date is the launch deadline?' }])).toBe(false);
     expect(canInterrupt({ ...gap, gapKey: 'different-id' }, gate, [{ ...gap, question: gap.question.toUpperCase() }])).toBe(false);
   });
+  it('rejects verbose questions and model requests for credentials or another user', () => {
+    for (const question of ['What is your API key?', 'Can you share another user\'s transcript?', 'Apa kata sandi Anda?', 'word '.repeat(33)]) {
+      expect(isUsefulQuestion({ ...gap, question })).toBe(false);
+      expect(canInterrupt({ ...gap, question }, gate, [])).toBe(false);
+    }
+    expect(isUsefulQuestion({ ...gap, category: 'owner', question: 'Who will deploy the landing page?' })).toBe(true);
+    expect(isUsefulQuestion({ ...gap, category: 'scope', question: 'Which requirements are necessary for launch?' })).toBe(true);
+  });
+  it('treats dismissed questions as considered gaps', () => {
+    expect(canInterrupt(gap, gate, [{ gapKey: gap.gapKey, question: gap.question, category: gap.category, disposition: 'dismissed' }])).toBe(false);
+  });
 });
 
 function harness() {
@@ -43,6 +54,62 @@ function harness() {
   return { controller, voice, fetcher, flush, get snapshot() { return snapshot!; }, advance: (ms: number) => { time += ms; } };
 }
 describe('live recording lifecycle', () => {
+  it('dismisses a silent clarification and retains review history without asking again', async () => {
+    const h = harness(); await h.controller.start(); h.controller.setVoiceEnabled(false);
+    h.controller.acceptTranscript('We will launch next month.', false); await h.flush();
+    h.controller.dismissQuestion();
+    expect(h.snapshot.question).toBe(''); expect(h.snapshot.asked[0].disposition).toBe('dismissed');
+    expect(h.snapshot.questionHistory[0].disposition).toBe('dismissed');
+    h.advance(40000); h.controller.acceptTranscript('We will launch next month. The landing page is almost ready.', false); await h.flush();
+    expect(h.snapshot.question).toBe(''); expect(h.voice.speak).not.toHaveBeenCalled(); h.controller.stop();
+  });
+  it('carries early owners and structured context into later analyses and resolves questions', async () => {
+    const h = harness(); await h.controller.start();
+    const context = { summary: 'Jovan owns deployment.', topics: ['Launch'], decisions: ['Jovan will deploy.'], actionItems: ['Deploy landing page.'], unresolvedQuestions: ['What day?'], structuredActionItems: [{ task: 'Deploy landing page', owner: 'Jovan', deadline: null }], people: ['Jovan'], deadlines: [], resolvedQuestions: [] };
+    h.fetcher.mockImplementationOnce(async () => Response.json({ ...gap, context }));
+    h.controller.acceptTranscript('Jovan will deploy it.', false); await h.flush();
+    h.advance(9000);
+    const transcript = `Jovan will deploy it. ${'Project discussion. '.repeat(4000)} We will launch Friday.`;
+    h.fetcher.mockImplementationOnce(async (_url, options) => {
+      const input = JSON.parse(options!.body as string);
+      expect(input.transcript.startsWith('Jovan will deploy it.')).toBe(true);
+      expect(input.transcript.endsWith('We will launch Friday.')).toBe(true);
+      expect(input.transcript.length).toBeLessThanOrEqual(60000);
+      expect(input.context.structuredActionItems[0].owner).toBe('Jovan');
+      return Response.json({ ...gap, shouldInterrupt: false, context: { ...context, unresolvedQuestions: [], deadlines: ['Friday'], resolvedQuestions: ['Launch deadline: Friday'], structuredActionItems: [{ task: 'Deploy landing page', owner: 'Jovan', deadline: 'Friday' }] } });
+    });
+    h.controller.acceptTranscript(transcript, false); await h.flush();
+    expect(h.snapshot.question).toBe(''); expect(h.snapshot.context.unresolvedQuestions).toEqual([]);
+    expect(h.snapshot.context.structuredActionItems?.[0]).toEqual({ task: 'Deploy landing page', owner: 'Jovan', deadline: 'Friday' }); h.controller.stop();
+  });
+  it('preserves edited notes during an in-flight and subsequent analysis', async () => {
+    const h = harness(); await h.controller.start();
+    let complete!: (value: Response) => void;
+    h.fetcher.mockImplementationOnce(async () => new Promise(resolve => { complete = resolve; }));
+    h.controller.acceptTranscript('Launch next month.', false); await h.flush();
+    h.controller.updateNotes('My reviewed notes.'); complete(Response.json(gap)); await h.flush();
+    expect(h.snapshot.notes).toBe('My reviewed notes.');
+    await h.controller.finalize('Launch next month.'); expect(h.snapshot.notes).toBe('My reviewed notes.'); h.controller.stop();
+  });
+  it('manual assistance remains read-only and independent of interruption settings and speech', async () => {
+    const h = harness(); await h.controller.start(); h.controller.setEnabled(false);
+    h.fetcher.mockImplementationOnce(async (url, options) => {
+      expect(url).toBe('/api/ask'); expect(JSON.parse(options!.body as string).transcript).toBe('Jovan will deploy on Friday.');
+      h.controller.acceptTranscript('Live speech continues.', true);
+      return Response.json({ answer: 'Jovan will deploy on Friday.' });
+    });
+    await h.controller.askAI('Who will deploy?', 'Jovan will deploy on Friday.');
+    expect(h.snapshot.manualResponse).toBe('Jovan will deploy on Friday.'); expect(h.snapshot.transcript).toBe('Live speech continues.');
+    expect(h.snapshot.manualBusy).toBe(false); expect(h.voice.speak).not.toHaveBeenCalled(); h.controller.stop();
+  });
+  it('does not let stale manual answers cross into another meeting', async () => {
+    const h = harness(); await h.controller.start();
+    let complete!: (value: Response) => void;
+    h.fetcher.mockImplementationOnce(async () => new Promise(resolve => { complete = resolve; }));
+    const pending = h.controller.askAI('Summarize', 'Sensitive first meeting.'); await h.flush();
+    h.controller.reset(); complete(Response.json({ answer: 'First meeting details.' })); await pending;
+    expect(h.snapshot.manualResponse).toBe(''); expect(h.snapshot.manualBusy).toBe(false);
+  });
   it('observes frequent microphone activity without repeated voice cancellation or UI updates', async () => {
     const changes = vi.fn();
     const voice = { speak: vi.fn(async () => true), cancel: vi.fn() };
@@ -110,6 +177,7 @@ describe('live recording lifecycle', () => {
     h.controller.acceptTranscript('Launch next month.', false); await h.flush();
     h.advance(10000); await h.controller.tick(); await h.flush();
     expect(h.voice.speak).not.toHaveBeenCalled(); expect(h.snapshot.question).toBe(gap.question);
+    expect(h.snapshot.questionHistory[0].disposition).toBe('suggested');
     h.controller.setPaused(true); h.controller.setVoiceEnabled(true);
     h.controller.acceptTranscript('Uncaptured paused speech', false); await h.controller.tick(); await h.flush();
     expect(h.voice.speak).not.toHaveBeenCalled(); expect(h.snapshot.transcript).toBe('Launch next month.');

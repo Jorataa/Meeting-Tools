@@ -1,12 +1,15 @@
 import { transcribeAudio, TranscriptionError } from '@/lib/ai/transcribe';
 import { audioMimeType, hasAudioHeader, MAX_AUDIO_BYTES, validateAudio } from '@/lib/audio/validation';
 import { rateLimit, sameOrigin, sessionId } from '@/lib/server-session';
+import {securityLog} from '@/lib/security/log';
+import {enforceAiQuota} from '@/lib/security/ai-quota';
 
 export const runtime = 'nodejs';
 export const maxDuration = 120;
 const MAX_BODY_BYTES = MAX_AUDIO_BYTES + 64 * 1024;
 const headers = { 'Cache-Control': 'no-store' };
 function failure(message: string, status: number, code: string) {
+  securityLog('transcription.failed',{route:'/api/transcribe',status,code});
   return Response.json({ error: message, code }, { status, headers: { ...headers, ...(status === 429 ? { 'Retry-After': '60' } : {}) } });
 }
 
@@ -41,6 +44,7 @@ export async function POST(request: Request) {
   if (!id) return failure('Your session expired. Please try again.', 401, 'SESSION');
   if (!request.headers.get('content-type')?.startsWith('multipart/form-data;')) return failure('Choose an audio file to transcribe.', 400, 'INVALID_INPUT');
   if (!rateLimit(`transcribe:${id}`, 6) || !rateLimit(`transcribe-hour:${id}`, 40, 3600000)) return failure('You have sent several recordings. Please wait a moment and try again.', 429, 'RATE_LIMITED');
+  const quota=await enforceAiQuota('transcribe');if(quota)return quota;
   try {
     const form = await boundedFormData(request);
     const audio = form.get('audio');
