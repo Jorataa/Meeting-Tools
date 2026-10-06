@@ -1,0 +1,7 @@
+import {createClient,SupabaseClient} from '@supabase/supabase-js';
+import {Meeting} from './model';
+let client:SupabaseClient|null|undefined;
+export function supabase(){if(client!==undefined)return client;const url=process.env.NEXT_PUBLIC_SUPABASE_URL,key=process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;client=url&&key?createClient(url,key):null;return client;}
+export async function cloudSave(meeting:Meeting){const c=supabase();if(!c)return false;const {data:{session}}=await c.auth.getSession();if(!session)return false;const {error}=await c.from('hush_meetings').upsert({id:meeting.id,user_id:session.user.id,title:meeting.title,started_at:new Date(meeting.startedAt).toISOString(),ended_at:meeting.endedAt?new Date(meeting.endedAt).toISOString():null,duration:meeting.duration,document:meeting,updated_at:new Date().toISOString()});if(error)throw new Error('Cloud save is unavailable. This meeting is saved on your device.');return true;}
+export async function cloudLoad():Promise<Meeting[]>{const c=supabase();if(!c)return [];const {data:{session}}=await c.auth.getSession();if(!session)return [];const {data,error}=await c.from('hush_meetings').select('document').order('started_at',{ascending:false}).limit(100);if(error)throw new Error('Cloud history could not load. Device history is still available.');return data.map(r=>r.document as Meeting);}
+export async function cloudDelete(id:string){const c=supabase();if(!c)return;const {error}=await c.from('hush_meetings').delete().eq('id',id);if(error)throw new Error('Cloud deletion failed. Please retry.');}
