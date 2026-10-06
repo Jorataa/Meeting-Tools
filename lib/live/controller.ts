@@ -80,6 +80,10 @@ export class LiveInterruptionController {
     this.notesVersion++; this.notesEdited = true;
     this.publish({ notes: notes.slice(0, 16000) });
   }
+  updateContext(updater: (prev: MeetingContext) => MeetingContext) {
+    const next = updater(this.view.context);
+    this.publish({ context: next });
+  }
   dismissQuestion() {
     const result = this.candidate?.result;
     this.cancelVoice(); this.clearCandidate();

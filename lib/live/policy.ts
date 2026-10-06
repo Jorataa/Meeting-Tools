@@ -9,6 +9,7 @@ export const actionItemSchema = z.object({
   task: z.string().trim().min(1).max(500),
   owner: z.string().max(160).nullable(),
   deadline: z.string().max(160).nullable(),
+  approved: z.boolean().optional(),
 });
 export const contextSchema = z.object({
   summary: z.string().max(3000),

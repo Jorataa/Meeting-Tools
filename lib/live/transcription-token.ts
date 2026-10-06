@@ -4,7 +4,8 @@ import {securityLog} from '@/lib/security/log';
 
 export function ephemeralLiveTransport() {
  const configured = process.env.GEMINI_LIVE_TRANSPORT;
- return configured === 'ephemeral' || (!configured && process.env.VERCEL === '1');
+ if (configured === 'relay' || configured === 'server') return false;
+ return configured === 'ephemeral' || process.env.VERCEL === '1' || !configured;
 }
 
 /** Provider-enforced, immutable transcription setup; the browser never receives a durable key. */

@@ -97,3 +97,84 @@ test('account deletion failure keeps the meeting visible until deletion succeeds
   await page.getByRole('button', { name: 'Confirm delete meeting', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Start recording', exact: true })).toBeVisible();
 });
+
+test('action item approval, question resolution, and personalization settings work smoothly', async ({ page }) => {
+  await setupDemo(page);
+  await completeUpload(page);
+
+  // Phase 3: Action item explicit approval
+  const actionItemsRegion = page.getByRole('region', { name: 'Action items', exact: true });
+  await expect(actionItemsRegion).toBeVisible();
+  const approveBtn = actionItemsRegion.getByRole('button', { name: 'Approve', exact: true });
+  await expect(approveBtn).toBeVisible();
+  await approveBtn.click();
+  await expect(actionItemsRegion.getByText('Approved')).toBeVisible();
+
+  // Phase 3: Question resolution
+  const unresolvedRegion = page.getByRole('region', { name: 'Unresolved questions', exact: true });
+  await expect(unresolvedRegion).toContainText('Who reviews the copy?');
+  const resolveBtn = unresolvedRegion.getByRole('button', { name: 'Resolve', exact: true });
+  await expect(resolveBtn).toBeVisible();
+  await resolveBtn.click();
+  await expect(unresolvedRegion).not.toBeVisible();
+  await expect(page.getByText('Resolved questions · 1')).toBeVisible();
+
+  // Phase 4: Personalization preferences in Settings
+  const nav = page.getByRole('navigation', { name: 'Main navigation', exact: true });
+  await nav.getByRole('button', { name: 'Settings', exact: true }).click();
+
+  const freqSelect = page.getByLabel('Clarification frequency');
+  await expect(freqSelect).toHaveValue('balanced');
+  await freqSelect.selectOption('minimal');
+  await expect(freqSelect).toHaveValue('minimal');
+
+  const langSelect = page.getByLabel('Meeting language');
+  await expect(langSelect).toHaveValue('auto');
+  await langSelect.selectOption('id');
+  await expect(langSelect).toHaveValue('id');
+
+  const styleSelect = page.getByLabel('Notes style');
+  await expect(styleSelect).toHaveValue('concise');
+  await styleSelect.selectOption('structured');
+  await expect(styleSelect).toHaveValue('structured');
+
+  // Verify persistence
+  const savedPrefs = await page.evaluate(() => JSON.parse(localStorage.getItem('hush.prefs.demo') || '{}'));
+  expect(savedPrefs.frequency).toBe('minimal');
+  expect(savedPrefs.language).toBe('id');
+  expect(savedPrefs.summaryStyle).toBe('structured');
+
+  // Responsive verification
+  await page.setViewportSize({ width: 390, height: 844 });
+  const hasHorizontalScroll = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+  expect(hasHorizontalScroll).toBe(false);
+
+  await page.setViewportSize({ width: 768, height: 1024 });
+  const tabletScroll = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+  expect(tabletScroll).toBe(false);
+});
+
+test('reloading the page restores the active meeting session and displays notice', async ({ page }) => {
+  await setupDemo(page);
+  await completeUpload(page);
+
+  // Reload the page
+  await page.reload();
+
+  // Verify restored notice appears
+  await expect(page.locator('.restored-notice')).toHaveText('Meeting restored');
+
+  // Verify meeting title and transcript are preserved
+  await expect(page.getByRole('textbox', { name: 'Meeting transcript', exact: true })).toHaveValue(initialNotes);
+  await expect(page.getByRole('region', { name: 'Meeting notes', exact: true })).toContainText(initialNotes);
+
+  // Clicking "New transcription" resets session storage so reload would not restore
+  await page.getByRole('button', { name: 'New transcription', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Start recording', exact: true })).toBeVisible();
+
+  // Reload again -> should stay on initial screen (not restore)
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Start recording', exact: true })).toBeVisible();
+  await expect(page.locator('.restored-notice')).not.toBeVisible();
+});
+

@@ -54,7 +54,8 @@ export function useMeetingHistory(ownerId: string) {
       if (version.current === generation && !abort.signal.aborted) setHistoryReady(true);
     };
     void load();
-    return () => { ++version.current; abort.abort(); };
+    const versionRef = version;
+    return () => { ++versionRef.current; abort.abort(); };
   }, [ownerId, cloud]);
   const setMeetings = useCallback((next: SetStateAction<SavedMeetingDocument[]>) => {
     const items = typeof next === 'function' ? next(documents.current) : next;

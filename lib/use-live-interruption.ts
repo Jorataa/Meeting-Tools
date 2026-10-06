@@ -21,7 +21,8 @@ export function useLiveInterruption() {
   const dismissQuestion = useCallback(() => { controller.current?.dismissQuestion(); }, []);
   const askAI = useCallback(async (question: string, transcript?: string, meeting?: { notes: string; context: MeetingContext }) => { await controller.current?.askAI(question, transcript, meeting); }, []);
   const updateNotes = useCallback((notes: string) => { controller.current?.updateNotes(notes); }, []);
+  const updateContext = useCallback((updater: (prev: MeetingContext) => MeetingContext) => { controller.current?.updateContext(updater); }, []);
   const toggleEnabled = () => { const next = !enabled; setEnabled(next); controller.current?.setEnabled(next); };
   const toggleVoice = () => { const next = !voiceEnabled; setVoiceEnabled(next); controller.current?.setVoiceEnabled(next); };
-  return { ...snapshot, enabled, voiceEnabled, start, stop, setPaused, onVoice, acceptTranscript, onStream: start, onCaptureEnd: stop, reset, finalize, toggleEnabled, toggleVoice, dismissQuestion, askAI, updateNotes };
+  return { ...snapshot, enabled, voiceEnabled, start, stop, setPaused, onVoice, acceptTranscript, onStream: start, onCaptureEnd: stop, reset, finalize, toggleEnabled, toggleVoice, dismissQuestion, askAI, updateNotes, updateContext };
 }

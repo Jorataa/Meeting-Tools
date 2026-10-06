@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronRight, Clock3, Copy, Download, FileAudio, FileText, Mic, Pause, Play, Search, ShieldCheck, Sparkles, Square, Trash2, Upload } from 'lucide-react';
 import { useLiveInterruption } from '@/lib/use-live-interruption';
+import type { MeetingContext } from '@/lib/live/policy';
 import { useTranscription } from '@/lib/use-transcription';
 import { AUDIO_ACCEPT } from '@/lib/audio/validation';
 import { download } from '@/lib/export';
@@ -28,6 +29,8 @@ export function TranscriptionApp({ ownerId = 'demo', accountEmail, onSignOut }: 
   const [panel, setPanel] = useState<'transcript' | 'context'>('transcript');
   const { meetings, setMeetings, historyReady, storageNotice, retention, setRetention, removeMeeting, clearHistory } = useMeetingHistory(ownerId);
   const [opened, setOpened] = useState<SavedMeeting | null>(null);
+  const [restoredNotice, setRestoredNotice] = useState('');
+  const restoredOnce = useRef(false);
   const [deleteConfirmation, setDeleteConfirmation] = useState<'meeting' | 'history' | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState('');
@@ -49,15 +52,40 @@ export function TranscriptionApp({ ownerId = 'demo', accountEmail, onSignOut }: 
   useEffect(() => { if (flow.state === 'success' && !opened) finalize(flow.transcript); }, [flow.state, flow.transcript, finalize, opened]);
   useEffect(() => { if (finished && view === 'meeting' && panel === 'transcript') editor.current?.focus(); }, [finished, view, panel]);
   useEffect(() => {
+    if (!historyReady || restoredOnce.current) return;
+    restoredOnce.current = true;
+    try {
+      const activeId = sessionStorage.getItem(`hush.activeMeeting.${encodeURIComponent(ownerId)}`);
+      if (!activeId) return;
+      const match = meetings.find(item => item.id === activeId);
+      if (match) {
+        setOpened(match);
+        meetingId.current = match.id;
+        setTitle(match.title);
+        setView('meeting');
+        setPanel('transcript');
+        setRestoredNotice('Meeting restored');
+        const timer = setTimeout(() => setRestoredNotice(''), 4000);
+        return () => clearTimeout(timer);
+      }
+    } catch { /* storage fallback */ }
+  }, [historyReady, meetings, ownerId]);
+  useEffect(() => {
+    try {
+      if (opened?.id) sessionStorage.setItem(`hush.activeMeeting.${encodeURIComponent(ownerId)}`, opened.id);
+    } catch { /* storage fallback */ }
+  }, [opened?.id, ownerId]);
+  useEffect(() => {
     if (flow.state !== 'success' || opened || !historyReady) return;
     if (!meetingId.current) meetingId.current = crypto.randomUUID();
     const id = meetingId.current;
+    try { sessionStorage.setItem(`hush.activeMeeting.${encodeURIComponent(ownerId)}`, id); } catch { /* storage fallback */ }
     setMeetings(previous => {
       const existing = previous.find(item => item.id === id);
       const next = { id, title: title.trim() || 'Untitled meeting', transcript: flow.transcript, notes: live.notes, context: live.context, date: existing?.date ?? Date.now(), elapsed: flow.elapsed, questions: live.questionHistory.map(item => `${item.question.slice(0, item.disposition === 'dismissed' ? 228 : 240)}${item.disposition === 'dismissed' ? ' (dismissed)' : ''}`) };
       return [next, ...previous.filter(item => item.id !== id)].slice(0, 30);
     });
-  }, [flow.state, flow.transcript, flow.elapsed, title, live.notes, live.context, live.questionHistory, opened, historyReady, setMeetings]);
+  }, [flow.state, flow.transcript, flow.elapsed, title, live.notes, live.context, live.questionHistory, opened, historyReady, setMeetings, ownerId]);
   useEffect(() => { setCopyFeedback(''); }, [transcript]);
   useEffect(() => {
     if (!copyFeedback) return;
@@ -70,18 +98,116 @@ export function TranscriptionApp({ ownerId = 'demo', accountEmail, onSignOut }: 
   }, [flow.partialTranscript, flow.segments, live.asked]);
 
   function cancel() { flow.cancel(); live.reset(); }
-  function newMeeting() { if (locked) return; setDeleteConfirmation(null); flow.reset(); live.reset(); setOpened(null); meetingId.current = ''; setTitle('Untitled meeting'); setView('meeting'); setPanel('transcript'); nearBottom.current = true; }
-  function openMeeting(id: string) { if (locked) return; setDeleteConfirmation(null); const item = meetings.find(meeting => meeting.id === id); if (!item) return; flow.reset(); live.reset(); setOpened(item); meetingId.current = item.id; setTitle(item.title); setView('meeting'); setPanel('transcript'); }
+  function newMeeting() {
+    if (locked) return;
+    setDeleteConfirmation(null);
+    flow.reset();
+    live.reset();
+    setOpened(null);
+    meetingId.current = '';
+    setTitle('Untitled meeting');
+    setView('meeting');
+    setPanel('transcript');
+    nearBottom.current = true;
+    try { sessionStorage.removeItem(`hush.activeMeeting.${encodeURIComponent(ownerId)}`); } catch { /* storage fallback */ }
+  }
+  function openMeeting(id: string) {
+    if (locked) return;
+    setDeleteConfirmation(null);
+    const item = meetings.find(meeting => meeting.id === id);
+    if (!item) return;
+    flow.reset();
+    live.reset();
+    setOpened(item);
+    meetingId.current = item.id;
+    setTitle(item.title);
+    setView('meeting');
+    setPanel('transcript');
+    try { sessionStorage.setItem(`hush.activeMeeting.${encodeURIComponent(ownerId)}`, item.id); } catch { /* storage fallback */ }
+  }
   const saveOpened = useCallback((updates: Partial<SavedMeeting>) => {
     setOpened(current => current ? { ...current, ...updates } : current);
     setMeetings(previous => previous.map(item => item.id === meetingId.current ? { ...item, ...updates } : item));
   }, [setMeetings]);
+  const [frequency, setFrequency] = useState<'balanced' | 'minimal'>('balanced');
+  const [language, setLanguage] = useState<'auto' | 'en' | 'id'>('auto');
+  const [summaryStyle, setSummaryStyle] = useState<'concise' | 'structured'>('concise');
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(`hush.prefs.${encodeURIComponent(ownerId)}`);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed.frequency) setFrequency(parsed.frequency);
+        if (parsed.language) setLanguage(parsed.language);
+        if (parsed.summaryStyle) setSummaryStyle(parsed.summaryStyle);
+      }
+    } catch { /* storage fallback */ }
+  }, [ownerId]);
+
+  const updateFrequency = useCallback((val: 'balanced' | 'minimal') => {
+    setFrequency(val);
+    try {
+      const stored = JSON.parse(localStorage.getItem(`hush.prefs.${encodeURIComponent(ownerId)}`) || '{}');
+      localStorage.setItem(`hush.prefs.${encodeURIComponent(ownerId)}`, JSON.stringify({ ...stored, frequency: val }));
+    } catch { /* noop */ }
+  }, [ownerId]);
+
+  const updateLanguage = useCallback((val: 'auto' | 'en' | 'id') => {
+    setLanguage(val);
+    try {
+      const stored = JSON.parse(localStorage.getItem(`hush.prefs.${encodeURIComponent(ownerId)}`) || '{}');
+      localStorage.setItem(`hush.prefs.${encodeURIComponent(ownerId)}`, JSON.stringify({ ...stored, language: val }));
+    } catch { /* noop */ }
+  }, [ownerId]);
+
+  const updateSummaryStyle = useCallback((val: 'concise' | 'structured') => {
+    setSummaryStyle(val);
+    try {
+      const stored = JSON.parse(localStorage.getItem(`hush.prefs.${encodeURIComponent(ownerId)}`) || '{}');
+      localStorage.setItem(`hush.prefs.${encodeURIComponent(ownerId)}`, JSON.stringify({ ...stored, summaryStyle: val }));
+    } catch { /* noop */ }
+  }, [ownerId]);
+
+  const handleApproveActionItem = useCallback((index: number) => {
+    const updater = (current: MeetingContext): MeetingContext => {
+      const items = current.structuredActionItems ? [...current.structuredActionItems] : [];
+      if (!items[index]) return current;
+      items[index] = { ...items[index], approved: true };
+      return { ...current, structuredActionItems: items };
+    };
+    if (opened) saveOpened({ context: updater(opened.context) });
+    else live.updateContext(updater);
+  }, [opened, saveOpened, live]);
+
+  const handleDismissActionItem = useCallback((index: number) => {
+    const updater = (current: MeetingContext): MeetingContext => {
+      const items = current.structuredActionItems ? current.structuredActionItems.filter((_, i) => i !== index) : [];
+      return { ...current, structuredActionItems: items };
+    };
+    if (opened) saveOpened({ context: updater(opened.context) });
+    else live.updateContext(updater);
+  }, [opened, saveOpened, live]);
+
+  const handleResolveQuestion = useCallback((questionText: string) => {
+    const updater = (current: MeetingContext): MeetingContext => {
+      const unresolved = current.unresolvedQuestions.filter(q => q !== questionText);
+      const resolved = current.resolvedQuestions ? [...current.resolvedQuestions, questionText] : [questionText];
+      return { ...current, unresolvedQuestions: unresolved, resolvedQuestions: resolved };
+    };
+    if (opened) saveOpened({ context: updater(opened.context) });
+    else live.updateContext(updater);
+  }, [opened, saveOpened, live]);
   async function deleteMeeting() {
     if (deleting) return;
     setDeleting(true);
-    const deleted = await removeMeeting(meetingId.current);
+    const id = meetingId.current;
+    const deleted = await removeMeeting(id);
     setDeleting(false);
-    if (deleted) { flow.reset(); live.reset(); setOpened(null); meetingId.current = ''; setTitle('Untitled meeting'); setDeleteConfirmation(null); }
+    if (deleted) {
+      flow.reset(); live.reset(); setOpened(null); meetingId.current = ''; setTitle('Untitled meeting'); setDeleteConfirmation(null);
+      try { sessionStorage.removeItem(`hush.activeMeeting.${encodeURIComponent(ownerId)}`); } catch { /* storage fallback */ }
+    }
   }
   async function deleteHistory() {
     if (deleteConfirmation !== 'history') { setDeleteConfirmation('history'); return; }
@@ -89,7 +215,10 @@ export function TranscriptionApp({ ownerId = 'demo', accountEmail, onSignOut }: 
     setDeleting(true);
     const deleted = await clearHistory();
     setDeleting(false);
-    if (deleted) { flow.reset(); live.reset(); setOpened(null); meetingId.current = ''; setTitle('Untitled meeting'); setDeleteConfirmation(null); }
+    if (deleted) {
+      flow.reset(); live.reset(); setOpened(null); meetingId.current = ''; setTitle('Untitled meeting'); setDeleteConfirmation(null);
+      try { sessionStorage.removeItem(`hush.activeMeeting.${encodeURIComponent(ownerId)}`); } catch { /* storage fallback */ }
+    }
   }
   function updateTitle(value: string) { setTitle(value); if (opened) saveOpened({ title: value.trim() || 'Untitled meeting' }); }
   async function copyTranscript() {
@@ -113,6 +242,7 @@ export function TranscriptionApp({ ownerId = 'demo', accountEmail, onSignOut }: 
           {flow.notice && <p className="notice-message" role="status">{flow.notice}</p>}
           {flow.liveNotice && <p className="notice-message" role="status">{flow.liveNotice}</p>}
           {storageNotice && <p className="notice-message" role="status">{storageNotice}</p>}
+          {restoredNotice && <p className="notice-message restored-notice" role="status">{restoredNotice}</p>}
           <section className="transcript-card" aria-label={finished ? 'Transcription result' : 'Audio transcription'} aria-busy={busy}>
             <div className="transcript-toolbar"><h2><FileText size={16} aria-hidden="true" />{finished ? 'Meeting transcript' : 'Live transcript'}</h2><span className="transcript-state" role="status"><span className={`status-dot ${recording ? 'is-recording' : ''} ${flow.state === 'error' ? 'is-error' : ''}`} />{opened ? 'Meeting complete' : stateLabels[flow.state]}</span></div>
             {requesting && <div className="permission-state"><span className="microphone-mark"><Mic size={24} aria-hidden="true" /></span><h2>Allow your microphone</h2><p>Choose Allow in your browser’s permission prompt to start recording.</p><button className="text-button" onClick={cancel}>Cancel</button></div>}
@@ -130,10 +260,10 @@ export function TranscriptionApp({ ownerId = 'demo', accountEmail, onSignOut }: 
         </div>
         <div className="meeting-control-dock"><div className="capture-status"><div className={`capture-icon ${recording ? 'is-recording' : ''}`}><Mic size={18} aria-hidden="true" /></div><div><strong>{recording ? 'Microphone active' : paused ? 'Recording paused' : finished ? 'Meeting complete' : busy ? 'Finishing your meeting' : 'Ready for your next conversation'}</strong><span>{recording ? live.status === 'speaking' ? 'AI is asking a question…' : aiLabel : paused ? 'Resume to continue capturing' : 'Indonesian, English, or a little of both'}</span></div></div><Waveform level={flow.level} active={recording && !live.suppressCapture} /><div className="capture-actions">{active && <><button className="secondary-button" onClick={paused ? flow.resumeRecording : flow.pauseRecording}>{paused ? <Play size={15} aria-hidden="true" /> : <Pause size={15} aria-hidden="true" />}{paused ? 'Resume recording' : 'Pause recording'}</button><button className="primary-button stop-button" onClick={flow.stopRecording}><Square size={13} fill="currentColor" aria-hidden="true" />Stop recording</button><button className="text-button cancel-recording" onClick={cancel}>Cancel recording</button></>}</div></div>
         <input ref={fileInput} className="visually-hidden" type="file" accept={AUDIO_ACCEPT} aria-label="Choose audio file" tabIndex={-1} disabled={!canChoose} onChange={event => { const file = event.target.files?.[0]; if (file) flow.selectAudio(file); event.target.value = ''; }} />
-      </> : <section className="workspace-library" aria-label={view === 'settings' ? 'Workspace settings' : 'Saved meetings'}><div className="library-heading"><span className="eyebrow">YOUR WORKSPACE</span><h1>{view === 'meetings' ? 'Meetings' : view === 'notes' ? 'Meeting notes' : view === 'search' ? 'Find a conversation' : 'Settings'}</h1><p>{view === 'settings' ? 'Choose how Hush participates in your meetings.' : accountEmail ? 'Your completed conversations, saved to your account.' : 'Your completed conversations, saved on this device.'}</p></div>{active && <p className="notice-message" role="status">Your recording continues. Return to Workspace for the live transcript and recording controls.</p>}{view === 'settings' ? <WorkspaceSettings enabled={live.enabled} voiceEnabled={live.voiceEnabled} toggleEnabled={live.toggleEnabled} toggleVoice={live.toggleVoice} retention={retention} setRetention={setRetention} meetingCount={meetings.length} locked={locked} confirming={deleteConfirmation === 'history'} onCancelDelete={() => setDeleteConfirmation(null)} onDelete={() => void deleteHistory()} onSignOut={onSignOut} accountEmail={accountEmail} /> : <>{view === 'search' && <label className="meeting-search"><Search size={18} aria-hidden="true" /><input aria-label="Search meetings" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search titles, transcripts, or notes…" /></label>}<div className="meeting-list">{(view === 'search' ? matches : meetings).length ? (view === 'search' ? matches : meetings).map(meeting => <button className="saved-meeting-card" key={meeting.id} onClick={() => openMeeting(meeting.id)} disabled={locked}><FileText size={19} aria-hidden="true" /><div><h2>{meeting.title}</h2><span>{dateLabel(meeting.date)} · {clock(meeting.elapsed)}</span><p>{view === 'notes' ? meeting.notes || meeting.context.summary || 'No AI notes for this meeting. Open to review its transcript.' : meeting.context.summary || meeting.transcript.slice(0, 180)}</p></div><ChevronRight size={16} aria-hidden="true" /></button>) : <div className="library-empty"><FileText size={26} aria-hidden="true" /><h2>{view === 'search' && query ? 'No matching meetings' : 'Your conversations belong here.'}</h2><p>{view === 'search' && query ? 'Try another word from the title, transcript, or notes.' : 'Complete a recording or upload audio to save your first meeting.'}</p><button className="primary-button" onClick={newMeeting} disabled={locked}>New Meeting</button></div>}</div></>}</section>}
+      </> : <section className="workspace-library" aria-label={view === 'settings' ? 'Workspace settings' : 'Saved meetings'}><div className="library-heading"><span className="eyebrow">YOUR WORKSPACE</span><h1>{view === 'meetings' ? 'Meetings' : view === 'notes' ? 'Meeting notes' : view === 'search' ? 'Find a conversation' : 'Settings'}</h1><p>{view === 'settings' ? 'Choose how Hush participates in your meetings.' : accountEmail ? 'Your completed conversations, saved to your account.' : 'Your completed conversations, saved on this device.'}</p></div>{active && <p className="notice-message" role="status">Your recording continues. Return to Workspace for the live transcript and recording controls.</p>}{view === 'settings' ? <WorkspaceSettings enabled={live.enabled} voiceEnabled={live.voiceEnabled} toggleEnabled={live.toggleEnabled} toggleVoice={live.toggleVoice} retention={retention} setRetention={setRetention} meetingCount={meetings.length} locked={locked} confirming={deleteConfirmation === 'history'} onCancelDelete={() => setDeleteConfirmation(null)} onDelete={() => void deleteHistory()} onSignOut={onSignOut} accountEmail={accountEmail} frequency={frequency} setFrequency={updateFrequency} language={language} setLanguage={updateLanguage} summaryStyle={summaryStyle} setSummaryStyle={updateSummaryStyle} /> : <>{view === 'search' && <label className="meeting-search"><Search size={18} aria-hidden="true" /><input aria-label="Search meetings" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search titles, transcripts, or notes…" /></label>}<div className="meeting-list">{(view === 'search' ? matches : meetings).length ? (view === 'search' ? matches : meetings).map(meeting => <button className="saved-meeting-card" key={meeting.id} onClick={() => openMeeting(meeting.id)} disabled={locked}><FileText size={19} aria-hidden="true" /><div><h2>{meeting.title}</h2><span>{dateLabel(meeting.date)} · {clock(meeting.elapsed)}</span><p>{view === 'notes' ? meeting.notes || meeting.context.summary || 'No AI notes for this meeting. Open to review its transcript.' : meeting.context.summary || meeting.transcript.slice(0, 180)}</p></div><ChevronRight size={16} aria-hidden="true" /></button>) : <div className="library-empty"><FileText size={26} aria-hidden="true" /><h2>{view === 'search' && query ? 'No matching meetings' : 'Your conversations belong here.'}</h2><p>{view === 'search' && query ? 'Try another word from the title, transcript, or notes.' : 'Complete a recording or upload audio to save your first meeting.'}</p><button className="primary-button" onClick={newMeeting} disabled={locked}>New Meeting</button></div>}</div></>}</section>}
     {view !== 'meeting' && active && <div className="library-recording-dock" aria-label="Recording controls"><button className="text-button" onClick={() => setView('meeting')}><Mic size={15} aria-hidden="true" />{paused ? 'Paused' : 'Recording'} · {clock(flow.elapsed)}</button><button className="secondary-button" onClick={paused ? flow.resumeRecording : flow.pauseRecording}>{paused ? 'Resume recording' : 'Pause recording'}</button><button className="primary-button" onClick={() => { setView('meeting'); flow.stopRecording(); }}><Square size={13} aria-hidden="true" />Stop recording</button></div>}
     </main>
-    <div className={`context-wrapper ${view !== 'meeting' ? 'is-library-context' : ''}`}><WorkspaceContext context={context} editable={finished} onNotesChange={value => opened ? saveOpened({ notes: value }) : live.updateNotes(value)} onAsk={question => live.askAI(question, opened ? opened.transcript : [flow.transcript, flow.partialTranscript].filter(Boolean).join(' '), { notes, context })} manualBusy={live.manualBusy} manualResponse={live.manualResponse} transcriptAvailable={!!(transcript || flow.partialTranscript).trim()} questions={opened?.questions || live.questionHistory.map(item => `${item.question.slice(0, item.disposition === 'dismissed' ? 228 : 240)}${item.disposition === 'dismissed' ? ' (dismissed)' : ''}`)} status={paused ? 'paused' : live.status} notes={notes} notice={live.notice} enabled={live.enabled} active={active && !paused} retry={flow.state === 'success' && !opened ? () => finalize(flow.transcript) : undefined} /><div className="context-controls" aria-label="AI meeting controls"><button className={`ai-voice-toggle ${live.enabled ? 'is-active' : ''}`} aria-pressed={live.enabled} onClick={live.toggleEnabled}>AI Interruption: {live.enabled ? 'ON' : 'OFF'}</button><button className={`ai-voice-toggle ${live.voiceEnabled ? 'is-active' : ''}`} aria-pressed={live.voiceEnabled} onClick={live.toggleVoice}>AI Voice: {live.voiceEnabled ? 'ON' : 'OFF'}</button></div></div>
+    <div className={`context-wrapper ${view !== 'meeting' ? 'is-library-context' : ''}`}><WorkspaceContext context={context} editable={finished} onNotesChange={value => opened ? saveOpened({ notes: value }) : live.updateNotes(value)} onAsk={question => live.askAI(question, opened ? opened.transcript : [flow.transcript, flow.partialTranscript].filter(Boolean).join(' '), { notes, context })} manualBusy={live.manualBusy} manualResponse={live.manualResponse} transcriptAvailable={!!(transcript || flow.partialTranscript).trim()} questions={opened?.questions || live.questionHistory.map(item => `${item.question.slice(0, item.disposition === 'dismissed' ? 228 : 240)}${item.disposition === 'dismissed' ? ' (dismissed)' : ''}`)} status={paused ? 'paused' : live.status} notes={notes} notice={live.notice} enabled={live.enabled} active={active && !paused} retry={flow.state === 'success' && !opened ? () => finalize(flow.transcript) : undefined} onApproveActionItem={handleApproveActionItem} onDismissActionItem={handleDismissActionItem} onResolveQuestion={handleResolveQuestion} /><div className="context-controls" aria-label="AI meeting controls"><button className={`ai-voice-toggle ${live.enabled ? 'is-active' : ''}`} aria-pressed={live.enabled} onClick={live.toggleEnabled}>AI Interruption: {live.enabled ? 'ON' : 'OFF'}</button><button className={`ai-voice-toggle ${live.voiceEnabled ? 'is-active' : ''}`} aria-pressed={live.voiceEnabled} onClick={live.toggleVoice}>AI Voice: {live.voiceEnabled ? 'ON' : 'OFF'}</button></div></div>
   </div>;
 }
 

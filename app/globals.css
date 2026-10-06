@@ -50,10 +50,13 @@
 .context-assistant h2{font-size:12px;margin-bottom:5px}
 .context-assistant div>p{font-size:11px}
 .ai-state-idle .status-dot{background:var(--muted)}
-.ai-state-idle .assistant-icon{color:var(--muted)}
+.ai-state-idle .assistant-icon{color:var(--muted);box-shadow:none;animation:none}
 .ai-state-listening .status-dot{background:var(--accent);animation:listen-breathe 2.4s ease-in-out infinite}
-.ai-state-asking .assistant-icon{color:var(--accent);border-color:#586749}
-.ai-state-analyzing .assistant-icon{animation:none}
+.ai-state-listening .assistant-icon{color:var(--accent);border-color:#485739;animation:listen-mic-pulse 2.2s cubic-bezier(0.4,0,0.6,1) infinite}
+.ai-state-asking .assistant-icon{color:var(--accent);border-color:#586749;background:#2b3425;animation:ask-pulse 1.8s ease-in-out infinite}
+.ai-state-analyzing .assistant-icon{color:var(--accent);border-color:#435038}
+.analyzing-indicator{display:inline-flex;align-items:center;width:26px;height:3px;background:#2b312b;border-radius:2px;overflow:hidden;margin-left:auto;position:relative}
+.analyzing-bar{position:absolute;top:0;bottom:0;width:10px;background:var(--accent);border-radius:2px;animation:scan-sweep 1.4s ease-in-out infinite alternate}
 .thinking-dots{display:inline-flex;align-items:center;gap:3px;margin-left:auto}
 .thinking-dots i{width:3px;height:3px;border-radius:50%;background:var(--accent);animation:think-breathe 1.3s ease-in-out infinite}
 .thinking-dots i:nth-child(2){animation-delay:.15s}
@@ -71,10 +74,21 @@
 .icon-button:hover{color:var(--ink);background:var(--raised)}
 .meeting-notes textarea{width:100%;font-size:13px;line-height:1.7;resize:vertical;background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:10px;min-height:150px}
 .export-notes{font-size:11px;padding:8px 0;min-height:32px;margin-top:8px}
-.structured-actions{list-style:none;padding:0;margin:0;display:grid;gap:13px}
+.structured-actions{list-style:none;padding:0;margin:0;display:grid;gap:11px}
+.structured-action-card{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;padding:8px 10px;background:#202521;border:1px solid #323d2e;border-radius:6px}
+.action-card-text{flex:1;min-width:0}
 .structured-actions li p{font-size:12px;line-height:1.65;color:#c4cdbe}
-.structured-actions li span{font-size:10px;line-height:1.6;color:#94a08e;display:block;margin-top:3px}
-.structured-actions+.context-placeholder{font-size:10px!important;margin-top:12px}
+.structured-actions li span{font-size:10px;line-height:1.6;color:#94a08e;display:block;margin-top:2px}
+.action-approval-row{display:flex;gap:4px;align-items:center;flex-shrink:0;margin-top:2px}
+.action-approve-button{display:inline-flex;align-items:center;gap:3px;padding:3px 7px;font-size:9px;font-weight:600;color:#21271c;background:var(--accent);border-radius:4px;border:1px solid var(--accent);line-height:1.3}
+.action-approve-button:hover{background:#cfeb99}
+.action-dismiss-button{font-size:9px;color:var(--muted);padding:3px 5px;border-radius:4px}
+.action-dismiss-button:hover{color:var(--ink);background:var(--raised)}
+.action-approved-pill{display:inline-flex;align-items:center;gap:3px;padding:2px 6px;font-size:9px;font-weight:600;color:var(--accent);background:#273221;border:1px solid #435436;border-radius:4px;flex-shrink:0}
+.unresolved-question-item{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.resolve-question-btn{display:inline-flex;align-items:center;gap:3px;font-size:9px;color:#a4b798;padding:2px 6px;border:1px solid #3c4737;border-radius:4px;flex-shrink:0;margin-left:auto}
+.resolve-question-btn:hover{color:var(--accent);background:#2c3526;border-color:var(--accent)}
+.structured-actions+.context-placeholder{font-size:10px!important;margin-top:10px}
 .ask-assistant form{display:flex;align-items:center;background:var(--bg);border:1px solid #444b43;border-radius:6px;padding:5px;gap:5px}
 .ask-assistant input{width:100%;padding:6px 4px;border:0;background:transparent;font-size:12px;min-height:30px}
 .assistant-send{display:grid;place-items:center;width:30px;height:30px;flex-shrink:0;border-radius:4px;background:#35402a;color:var(--accent)}
@@ -112,7 +126,8 @@
 @media(min-width:1450px){.workspace-shell{grid-template-columns:194px minmax(0,1fr) 320px}.workspace-main{padding-left:40px;padding-right:40px}}
 @media(max-width:1190px) and (min-width:1021px){.workspace-shell{grid-template-columns:170px minmax(0,1fr) 265px}.workspace-main{padding-left:20px;padding-right:20px}.context-wrapper{padding-left:14px;padding-right:14px}.capture-status{max-width:160px}.capture-actions{max-width:195px}}
 @media(max-width:1020px){.workspace-shell{grid-template-columns:174px minmax(0,1fr)}.context-wrapper{left:204px;right:30px;top:240px;bottom:94px}.capture-status{max-width:none}.capture-actions{max-width:none}}
-@media(max-width:700px){.workspace-main{padding-left:16px;padding-right:16px}.workspace-header{display:none}.workspace-sidebar{height:103px}.workspace-nav button{font-size:11px}.meeting-heading{padding-top:16px;padding-bottom:10px}.meeting-title{font-size:22px}.meeting-heading p{font-size:11px}.meeting-meta{font-size:10px;gap:12px}.meeting-heading .eyebrow{font-size:8px}.meeting-badge{font-size:9px;margin-top:17px}.workspace-tabs{margin-bottom:10px}.context-wrapper{left:16px;right:16px;top:262px;bottom:144px;padding-left:16px;padding-right:16px}.context-heading{min-height:40px}.context-assistant{margin:8px 0}.context-section{padding:15px 0}.transcript-toolbar h2{font-size:11px}.transcript-state{font-size:9px}.initial-controls{padding:28px 14px}.initial-controls h2{font-size:19px}.initial-controls>p{font-size:12px}.capture-status strong{font-size:11px}.capture-status span{font-size:9px}.capture-actions .primary-button,.capture-actions .secondary-button{min-height:44px;font-size:12px}.capture-actions .cancel-recording{font-size:10px}.ask-assistant input,.meeting-notes textarea{font-size:16px}.assistant-send{height:36px;width:36px}.question-dismiss{min-height:36px}.context-summary,.assistant-response{font-size:13px}.delete-meeting{margin-left:0}.settings-card p{font-size:12px}.retention-settings select{font-size:16px}.context-visible .meeting-body{display:none}.meeting-body{min-height:0;flex:1}.meeting-control-dock{margin-top:auto}}
+@media(max-width:700px){.workspace-main{padding-left:16px;padding-right:16px}.workspace-header{display:none}.workspace-sidebar{height:103px}.workspace-nav button{font-size:11px}.meeting-heading{padding-top:16px;padding-bottom:10px}.meeting-title{font-size:22px}.meeting-heading p{font-size:11px}.meeting-meta{font-size:10px;gap:12px}.meeting-heading .eyebrow{font-size:8px}.meeting-badge{font-size:9px;margin-top:17px}.workspace-tabs{margin-bottom:10px}.context-wrapper{display:none;position:absolute;left:16px;right:16px;top:262px;bottom:144px;padding-left:16px;padding-right:16px;overflow:hidden}.context-visible .context-wrapper{display:flex;flex-direction:column}.context-wrapper .workspace-context{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;padding-bottom:20px}.context-heading{min-height:40px}.context-assistant{margin:8px 0}.context-section{padding:15px 0}.transcript-toolbar h2{font-size:11px}.transcript-state{font-size:9px}.initial-controls{padding:28px 14px}.initial-controls h2{font-size:19px}.initial-controls>p{font-size:12px}.capture-status strong{font-size:11px}.capture-status span{font-size:9px}.capture-actions .primary-button,.capture-actions .secondary-button{min-height:44px;font-size:12px}.capture-actions .cancel-recording{font-size:10px}.ask-assistant input,.meeting-notes textarea{font-size:16px}.assistant-send{height:36px;width:36px}.question-dismiss{min-height:36px}.context-summary,.assistant-response{font-size:13px}.delete-meeting{margin-left:0}.settings-card p{font-size:12px}.retention-settings select{font-size:16px}.context-visible .meeting-body{display:none}.meeting-body{min-height:0;flex:1}.meeting-control-dock{margin-top:auto}}
+.restored-notice{border-color:#3d4e33;color:#c0df81;background:#20281d}
 @media(prefers-reduced-motion:reduce){.thinking-dots i,.ai-state-listening .status-dot{animation:none!important}}
 .workspace-shell.library-view{grid-template-columns:184px minmax(0,1fr)}
 .library-view .context-wrapper{display:none}
