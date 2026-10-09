@@ -212,6 +212,7 @@ export class LiveInterruptionController {
     const revision = this.revision, observation = this.observation, notesVersion = this.notesVersion;
     this.analysisBusy = true; this.lastAnalysisAt = this.now();
     if (!final) { this.clearCandidate(); this.publish({ status: 'thinking' }); }
+    else { this.publish({ status: 'transcribing' }); }
     try {
       const response = await this.request('/api/interruption', {
         transcript: this.memoryTranscript(transcript), notes: this.view.notes.slice(0, 16000), context: this.view.context, asked: this.view.asked.slice(-50), final,
@@ -238,7 +239,12 @@ export class LiveInterruptionController {
       this.analysisRetryAt = this.now() + 20000;
       this.publish({ notice: 'AI analysis is temporarily unavailable. Recording continues; your transcript is safe.' });
       return false;
-    } finally { if (epoch === this.epoch) this.analysisBusy = false; }
+    } finally {
+      if (epoch === this.epoch) {
+        this.analysisBusy = false;
+        if (final && !this.view.active) this.publish({ status: 'idle' });
+      }
+    }
   }
   private async ask(candidate: NonNullable<LiveInterruptionController['candidate']>, epoch: number) {
     this.voiceBusy = true; this.publish({ status: 'waiting' });

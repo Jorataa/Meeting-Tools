@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AudioRecorder, microphoneError } from './audio/recorder';
 import { validateAudio } from './audio/validation';
 import { StreamingTranscription } from './live/transcription-client';
+import { BrowserSpeechRecognition, isBrowserSpeechSupported } from './live/speech-recognition';
 import type { Segment } from './model';
 
 export type TranscriptionState = 'initial' | 'requesting' | 'recording' | 'paused' | 'stopping' | 'audio-ready' | 'uploading' | 'transcribing' | 'success' | 'error';
@@ -14,6 +15,7 @@ export type LiveCallbacks = {
   onMeetingStart?: () => void; onMeetingStop?: () => void;
   onTranscript?: (text: string, partial: boolean) => void;
   onVoice?: () => void; onPaused?: (paused: boolean) => void; suppressed?: boolean;
+  language?: 'auto' | 'en' | 'id';
 };
 export function useTranscription(live?: LiveCallbacks) {
   const liveRef = useRef(live); liveRef.current = live;
@@ -33,6 +35,8 @@ export function useTranscription(live?: LiveCallbacks) {
   const [streamStatus, setStreamStatus] = useState<'idle' | 'connecting' | 'listening' | 'reconnecting' | 'error'>('idle');
   const [liveNotice, setLiveNotice] = useState('');
   const streaming = useRef<StreamingTranscription | null>(null);
+  const browserSpeech = useRef<BrowserSpeechRecognition | null>(null);
+  const pauseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const liveFinish = useRef<Promise<void> | null>(null);
   const finishingTransport = useRef<StreamingTranscription | null>(null);
   const committed = useRef<Segment[]>([]);
@@ -41,7 +45,10 @@ export function useTranscription(live?: LiveCallbacks) {
   const accumulatedMs = useRef(0);
   const stopping = useRef(false);
   const liveGeneration = useRef(0);
-  useEffect(() => { streaming.current?.setSuppressed(!!live?.suppressed); }, [live?.suppressed]);
+  useEffect(() => {
+    streaming.current?.setSuppressed(!!live?.suppressed);
+    if (state === 'recording' || state === 'paused') browserSpeech.current?.setPaused(state === 'paused' || !!live?.suppressed);
+  }, [live?.suppressed, state]);
   useEffect(() => {
     let disposed = false;
     let permission: PermissionStatus | undefined;
@@ -74,6 +81,8 @@ export function useTranscription(live?: LiveCallbacks) {
     return () => {
       mounted.current = false;
       lifecycle.recording.current++; lifecycle.streaming.current++;
+      if (pauseTimer.current) { clearTimeout(pauseTimer.current); pauseTimer.current = null; }
+      browserSpeech.current?.cancel(); browserSpeech.current = null;
       streaming.current?.cancel(); finishingTransport.current?.cancel(); recorder.current?.cancel(); request.current?.abort(); controller.current?.abort();
     };
   }, []);
@@ -135,8 +144,101 @@ export function useTranscription(live?: LiveCallbacks) {
     setTranscript(text); setSegments([...committed.current]); setPartialTranscript(partial.current);
     liveRef.current?.onTranscript?.([text, partial.current].filter(Boolean).join('\n\n'), isPartial);
   }, []);
+
+  const commitCurrentPartial = useCallback(() => {
+    if (pauseTimer.current) {
+      clearTimeout(pauseTimer.current);
+      pauseTimer.current = null;
+    }
+    const current = partial.current.trim();
+    if (!current) return;
+
+    const normCurrent = current.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const last = committed.current[committed.current.length - 1];
+    const normLast = last ? last.text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim() : '';
+
+    if (last && (normLast === normCurrent || normLast.endsWith(normCurrent))) {
+      // Already captured
+    } else if (last && normCurrent.startsWith(normLast) && normCurrent.length > normLast.length) {
+      last.text = current;
+    } else {
+      committed.current.push({
+        id: `live-seg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        text: current,
+        at: partialAt.current || Date.now(),
+        speaker: 'Participant',
+        source: 'human',
+      });
+    }
+    partial.current = '';
+    partialAt.current = 0;
+    publishTranscript(false);
+  }, [publishTranscript]);
+
+  const handlePartial = useCallback((text: string, at: number, epoch: number) => {
+    if (epoch !== liveGeneration.current) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    if (partial.current.trim()) {
+      const existingNorm = partial.current.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+      const newNorm = trimmed.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+      const firstWord = existingNorm.split(' ')[0];
+      const newFirstWord = newNorm.split(' ')[0];
+      if (firstWord && newFirstWord && !newNorm.includes(firstWord) && !existingNorm.includes(newFirstWord) && !newNorm.startsWith(existingNorm.slice(0, 8))) {
+        commitCurrentPartial();
+      }
+    }
+
+    if (!partial.current) partialAt.current = at;
+    partial.current = trimmed;
+    publishTranscript(true);
+
+    if (pauseTimer.current) clearTimeout(pauseTimer.current);
+    pauseTimer.current = setTimeout(() => {
+      if (epoch === liveGeneration.current && stateRef.current === 'recording') {
+        commitCurrentPartial();
+      }
+    }, 1400);
+  }, [commitCurrentPartial, publishTranscript]);
+
+  const handleFinal = useCallback((text: string, at: number, id: string, epoch: number) => {
+    if (epoch !== liveGeneration.current || !text.trim()) return;
+    if (pauseTimer.current) {
+      clearTimeout(pauseTimer.current);
+      pauseTimer.current = null;
+    }
+    const trimmed = text.trim();
+    if (committed.current.some(segment => segment.id === id)) return;
+
+    const last = committed.current[committed.current.length - 1];
+    const normTrimmed = trimmed.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const normLast = last ? last.text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim() : '';
+
+    if (last && (normLast === normTrimmed || normLast.endsWith(normTrimmed))) {
+      // Already committed
+    } else if (last && normTrimmed.startsWith(normLast) && normTrimmed.length > normLast.length) {
+      last.text = trimmed;
+      last.id = id;
+    } else {
+      committed.current.push({
+        id,
+        text: trimmed,
+        at: partialAt.current || at,
+        speaker: 'Participant',
+        source: 'human',
+      });
+    }
+    partial.current = '';
+    partialAt.current = 0;
+    publishTranscript(false);
+  }, [publishTranscript]);
+
   const finishLive = useCallback((): Promise<void> => {
     if (liveFinish.current) return liveFinish.current;
+    if (pauseTimer.current) { clearTimeout(pauseTimer.current); pauseTimer.current = null; }
+    commitCurrentPartial();
+    browserSpeech.current?.stop(); browserSpeech.current = null;
     const transport = streaming.current; streaming.current = null;
     finishingTransport.current = transport;
     const epoch = liveGeneration.current;
@@ -150,36 +252,41 @@ export function useTranscription(live?: LiveCallbacks) {
     })();
     liveFinish.current = pending;
     return pending;
-  }, []);
+  }, [commitCurrentPartial]);
+
   const startRecording = useCallback(async () => {
     if (!mounted.current || locked.current) return;
     locked.current = true; stopping.current = false;
     const currentGeneration = ++generation.current;
     const epoch = ++liveGeneration.current;
     liveFinish.current = null;
+    if (pauseTimer.current) { clearTimeout(pauseTimer.current); pauseTimer.current = null; }
+    browserSpeech.current?.cancel(); browserSpeech.current = null;
     committed.current = []; partial.current = ''; partialAt.current = 0;
     accumulatedMs.current = 0;
     setTranscript(''); setSegments([]); setPartialTranscript(''); setLevel(0);
     setError(''); setNotice(''); setLiveNotice(''); setStreamStatus('idle'); setElapsed(0); setState('requesting');
+
+    // Start native browser speech recognition if supported for instant 0ms streaming
+    if (isBrowserSpeechSupported()) {
+      const browser = new BrowserSpeechRecognition(
+        {
+          onPartial: (text, at) => { if (!liveRef.current?.suppressed) handlePartial(text, at, epoch); },
+          onFinal: (text, at, id) => { if (!liveRef.current?.suppressed) handleFinal(text, at, id, epoch); },
+        },
+        liveRef.current?.language || 'auto',
+      );
+      browserSpeech.current = browser;
+      browser.start();
+    }
+
     const capture = new AudioRecorder({
       onStream: stream => {
         if (currentGeneration !== generation.current) return;
         setMicPermission('granted'); liveRef.current?.onMeetingStart?.();
         const transport = new StreamingTranscription({
-          onPartial: (text, at) => {
-            if (epoch !== liveGeneration.current) return;
-            if (!partial.current) partialAt.current = at;
-            // Interim events replace only the active hypothesis. Empty service
-            // updates must not erase already visible words.
-            if (text.trim()) partial.current = text;
-            publishTranscript(true);
-          },
-          onFinal: (text, at, id) => {
-            if (epoch !== liveGeneration.current || !text.trim()) return;
-            if (committed.current.some(segment => segment.id === id)) return;
-            committed.current.push({ id, text: text.trim(), at: partialAt.current || at, speaker: 'Participant', source: 'human' });
-            partial.current = ''; partialAt.current = 0; publishTranscript(false);
-          },
+          onPartial: (text, at) => handlePartial(text, at, epoch),
+          onFinal: (text, at, id) => handleFinal(text, at, id, epoch),
           onStatus: (status, message) => {
             if (epoch !== liveGeneration.current) return;
             setStreamStatus(status); setLiveNotice(message || '');
@@ -192,8 +299,11 @@ export function useTranscription(live?: LiveCallbacks) {
         streaming.current = transport; transport.setSuppressed(!!liveRef.current?.suppressed);
         void transport.start(stream).catch(cause => {
           if (epoch !== liveGeneration.current) return;
-          setStreamStatus('error');
-          setLiveNotice(`${cause instanceof Error ? cause.message : 'Live transcription could not connect.'} Your audio is still recording; Stop will transcribe the saved recording.`);
+          // If browser speech recognition is actively streaming words, keep status listening
+          if (!browserSpeech.current) {
+            setStreamStatus('error');
+            setLiveNotice(`${cause instanceof Error ? cause.message : 'Live transcription could not connect.'} Your audio is still recording; Stop will transcribe the saved recording.`);
+          }
         });
       },
       onCaptureEnd: () => { void finishLive(); },
@@ -219,15 +329,19 @@ export function useTranscription(live?: LiveCallbacks) {
     } catch (cause) {
       if (currentGeneration !== generation.current) return;
       locked.current = false; recorder.current = null;
+      browserSpeech.current?.cancel(); browserSpeech.current = null;
       const name = cause instanceof Error ? cause.name : '';
       if (name === 'NotAllowedError' || name === 'SecurityError') setMicPermission('denied');
       else if (name === 'NotFoundError' || name === 'NotReadableError') setMicPermission('unavailable');
       setError(cause instanceof Error && cause.name === 'Error' ? cause.message : microphoneError(cause)); setState('error');
     }
-  }, [finishLive, publishTranscript, transcribe]);
+  }, [finishLive, handleFinal, handlePartial, transcribe]);
+
   const cancel = useCallback(() => {
     const discardCapture = ['requesting', 'recording', 'paused'].includes(stateRef.current);
     generation.current++; liveGeneration.current++;
+    if (pauseTimer.current) { clearTimeout(pauseTimer.current); pauseTimer.current = null; }
+    browserSpeech.current?.cancel(); browserSpeech.current = null;
     streaming.current?.cancel(); streaming.current = null;
     finishingTransport.current?.cancel(); finishingTransport.current = null;
     recorder.current?.cancel(); recorder.current = null; liveRef.current?.onMeetingStop?.();
@@ -239,35 +353,46 @@ export function useTranscription(live?: LiveCallbacks) {
     }
     setLevel(0); setStreamStatus('idle'); setLiveNotice(''); setError(''); setNotice(''); setElapsed(0); setState(audio ? 'audio-ready' : 'initial');
   }, [audio]);
+
   const reset = useCallback(() => {
     cancel(); committed.current = []; partial.current = ''; partialAt.current = 0;
     setAudio(null); setTranscript(''); setSegments([]); setPartialTranscript(''); setState('initial');
   }, [cancel]);
+
   const pauseRecording = useCallback(() => {
     if (stateRef.current !== 'recording' || !recorder.current || stopping.current) return;
     accumulatedMs.current += Date.now() - startedAt.current;
-    recorder.current.pause(); streaming.current?.setPaused(true); liveRef.current?.onPaused?.(true);
+    if (pauseTimer.current) { clearTimeout(pauseTimer.current); pauseTimer.current = null; }
+    commitCurrentPartial();
+    recorder.current.pause(); streaming.current?.setPaused(true); browserSpeech.current?.setPaused(true);
+    liveRef.current?.onPaused?.(true);
     setLevel(0); setState('paused'); stateRef.current = 'paused';
-  }, []);
+  }, [commitCurrentPartial]);
+
   const resumeRecording = useCallback(() => {
     if (stateRef.current !== 'paused' || !recorder.current || stopping.current) return;
-    startedAt.current = Date.now(); recorder.current.resume(); streaming.current?.setPaused(false);
+    startedAt.current = Date.now(); recorder.current.resume(); streaming.current?.setPaused(false); browserSpeech.current?.setPaused(false);
     liveRef.current?.onPaused?.(false); setState('recording'); stateRef.current = 'recording';
   }, []);
+
   const selectAudio = useCallback((file: File) => {
     if (locked.current) return;
     const invalid = validateAudio(file); setError(invalid || ''); setNotice('');
     if (invalid) { setState('error'); return; }
     setAudio(file); setElapsed(0); setState('audio-ready');
   }, []);
+
   const stopRecording = useCallback(() => {
     if (!recorder.current) return;
     if (stopping.current) return;
     stopping.current = true;
+    if (pauseTimer.current) { clearTimeout(pauseTimer.current); pauseTimer.current = null; }
+    commitCurrentPartial();
+    browserSpeech.current?.stop(); browserSpeech.current = null;
     if (stateRef.current === 'recording') accumulatedMs.current += Date.now() - startedAt.current;
     setElapsed(Math.floor(accumulatedMs.current / 1000)); setState('stopping');
     stateRef.current = 'stopping';
     liveRef.current?.onPaused?.(true); recorder.current.stop();
-  }, []);
+  }, [commitCurrentPartial]);
   return { state, ready, audio, transcript, partialTranscript, segments, level, micPermission, streamStatus, liveNotice, pauseRecording, resumeRecording, setTranscript, error, notice, elapsed, progress, startRecording, stopRecording, selectAudio, transcribe, cancel, reset };
 }
